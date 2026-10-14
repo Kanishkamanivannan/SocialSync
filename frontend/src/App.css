@@ -1,0 +1,73 @@
+/* SocialSync Responsive Layout & UI Utilities */
+
+.app-container {
+  display: flex;
+  min-height: 100vh;
+  width: 100vw;
+  background-color: var(--bg-app);
+  overflow-x: hidden;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.content-body {
+  flex: 1;
+  padding: 2.25rem 2.5rem;
+  max-width: 1440px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 1024px) {
+  .content-body {
+    padding: 1.75rem 1.5rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar-desktop {
+    display: none !important;
+  }
+  
+  .mobile-nav-toggle {
+    display: flex !important;
+  }
+
+  .nav-search-bar {
+    display: none !important;
+  }
+
+  .content-body {
+    padding: 1.25rem 1rem;
+  }
+
+  .calendar-grid-layout {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .content-body {
+    padding: 1rem 0.75rem;
+  }
+}
