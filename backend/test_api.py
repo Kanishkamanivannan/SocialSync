@@ -737,6 +737,143 @@ def run_tests():
             and 'oauth_message=' not in cb_origin_html,
         )
 
+        # 12F-2. OAuth Callback Reflected XSS & State Validation Guards
+        import json as _json
+        import re as _re
+        from urllib.parse import quote as _url_quote
+        from app import _render_oauth_callback_html as _render_cb
+
+        xss_probe = "</script><script>alert(1)</script>&<img src=x onerror=alert(2)>"
+        xss_encoded = _url_quote(xss_probe, safe="")
+
+        def _has_callback_security_headers(resp):
+            csp = resp.headers.get("Content-Security-Policy", "")
+            return (
+                resp.headers.get("X-Frame-Options") == "DENY"
+                and resp.headers.get("X-Content-Type-Options") == "nosniff"
+                and resp.headers.get("Referrer-Policy") == "no-referrer"
+                and resp.headers.get("Cache-Control") == "no-store"
+                and "default-src 'none'" in csp
+                and "script-src 'nonce-" in csp
+                and "style-src 'nonce-" in csp
+                and "frame-ancestors 'none'" in csp
+                and "'unsafe-inline'" not in csp
+            )
+
+        # (a) Missing state with injected error/error_description reflects nothing and sets security headers
+        cb_missing_state = client.get(
+            f"/api/oauth/facebook/callback?error={xss_encoded}&error_description={xss_encoded}"
+        )
+        cb_missing_html = cb_missing_state.get_data(as_text=True)
+        assert_test(
+            "Missing OAuth state returns generic error, blocks XSS reflection, and sends CSP/XFO headers",
+            cb_missing_state.status_code == 400
+            and "OAuth state replay/CSRF" in cb_missing_html
+            and "alert(1)" not in cb_missing_html
+            and "alert(2)" not in cb_missing_html
+            and "<img src=x" not in cb_missing_html
+            and _has_callback_security_headers(cb_missing_state),
+        )
+
+        # (b) Tampered/invalid state with injected error payload returns generic error without reflection
+        cb_bad_state = client.get(
+            f"/api/oauth/facebook/callback?state=tampered.invalid.state&error={xss_encoded}&error_description={xss_encoded}"
+        )
+        cb_bad_html = cb_bad_state.get_data(as_text=True)
+        assert_test(
+            "Invalid OAuth state returns generic error and ignores attacker error parameters",
+            cb_bad_state.status_code == 400
+            and "OAuth state replay/CSRF" in cb_bad_html
+            and "alert(1)" not in cb_bad_html
+            and "alert(2)" not in cb_bad_html
+            and _has_callback_security_headers(cb_bad_state),
+        )
+
+        # (c) Valid fresh state consumes nonce and safely serializes error payload inside JSON script + CSP nonce
+        xss_start = client.get('/api/oauth/facebook/start?origin=http://127.0.0.1:5173', headers=new_auth_hdr)
+        xss_auth_url = xss_start.get_json().get('auth_url', '')
+        xss_state = (parse_qs(urlparse(xss_auth_url).query).get('state') or [''])[0]
+        cb_xss_valid = client.get(
+            f"/api/oauth/facebook/callback?error=access_denied&error_description={xss_encoded}&state={xss_state}"
+        )
+        cb_xss_html = cb_xss_valid.get_data(as_text=True)
+
+        json_block_match = _re.search(
+            r'<script id="oauth-callback-data" type="application/json">(.*?)</script>',
+            cb_xss_html,
+            _re.DOTALL,
+        )
+        exec_nonce_match = _re.search(r'<script nonce="([^"]+)">', cb_xss_html)
+        csp_header_val = cb_xss_valid.headers.get("Content-Security-Policy", "")
+        csp_nonce_match = _re.search(r"script-src 'nonce-([^']+)'", csp_header_val)
+
+        parsed_cb_config = _json.loads(json_block_match.group(1)) if json_block_match else {}
+        json_raw_text = json_block_match.group(1) if json_block_match else ""
+
+        # Verify nonce was consumed by immediately replaying the same state with XSS payload
+        cb_replay_xss = client.get(
+            f"/api/oauth/facebook/callback?error={xss_encoded}&error_description={xss_encoded}&state={xss_state}"
+        )
+        cb_replay_html = cb_replay_xss.get_data(as_text=True)
+
+        assert_test(
+            "Valid OAuth callback escapes HTML/JSON safely, binds CSP nonce, and consumes state before error handling",
+            cb_xss_valid.status_code == 400
+            and "<script>alert(1)</script>" not in cb_xss_html
+            and "<img src=x" not in cb_xss_html
+            and "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in cb_xss_html
+            and bool(json_block_match)
+            and "\\u003c" in json_raw_text
+            and "\\u003e" in json_raw_text
+            and "\\u0026" in json_raw_text
+            and "<" not in json_raw_text
+            and ">" not in json_raw_text
+            and "&" not in json_raw_text
+            and parsed_cb_config.get("targetOrigin") == "http://127.0.0.1:5173"
+            and "alert(1)" in parsed_cb_config.get("payload", {}).get("error", "")
+            and bool(exec_nonce_match and csp_nonce_match and exec_nonce_match.group(1) == csp_nonce_match.group(1))
+            and _has_callback_security_headers(cb_xss_valid)
+            and cb_replay_xss.status_code == 400
+            and "OAuth state replay/CSRF" in cb_replay_html
+            and "alert(1)" not in cb_replay_html,
+        )
+
+        # (d) Direct unit test of _render_oauth_callback_html escaping
+        from app import app as _flask_app
+        with _flask_app.app_context():
+            unit_resp = _render_cb(
+                False,
+                f"Msg {xss_probe}",
+                platforms=[{"name": "A</script><script>x</script>&'\""}],
+                error=f"Err {xss_probe}",
+                target_origin="http://127.0.0.1:5173",
+            )
+        unit_html = unit_resp.get_data(as_text=True)
+        unit_json_match = _re.search(
+            r'<script id="oauth-callback-data" type="application/json">(.*?)</script>',
+            unit_html,
+            _re.DOTALL,
+        )
+        unit_json_raw = unit_json_match.group(1) if unit_json_match else ""
+        unit_parsed = _json.loads(unit_json_raw) if unit_json_match else {}
+        assert_test(
+            "_render_oauth_callback_html escapes <, >, &, quotes and prevents </script> breakout",
+            unit_resp.status_code == 400
+            and "<script>alert(1)</script>" not in unit_html
+            and "<script>x</script>" not in unit_html
+            and "&lt;/script&gt;" in unit_html
+            and "\\u003c" in unit_json_raw
+            and "\\u003e" in unit_json_raw
+            and "\\u0026" in unit_json_raw
+            and "\\u0027" in unit_json_raw
+            and "<" not in unit_json_raw
+            and ">" not in unit_json_raw
+            and "&" not in unit_json_raw
+            and unit_parsed.get("payload", {}).get("message") == f"Msg {xss_probe}"
+            and unit_parsed.get("targetOrigin") == "http://127.0.0.1:5173"
+            and _has_callback_security_headers(unit_resp),
+        )
+
         # 12G. Standalone token_crypto string AAD & temp-file permission hardening
         str_ct = encrypt_token("standalone_secret_val", aad="user:99:str-aad")
         assert_test("token_crypto accepts string AAD cleanly", decrypt_token(str_ct, aad="user:99:str-aad") == "standalone_secret_val")

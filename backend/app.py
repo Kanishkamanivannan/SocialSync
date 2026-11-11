@@ -1195,6 +1195,19 @@ def _resolve_oauth_target_origin(candidate_origin: str | None = None) -> str:
     return _extract_origin(get_frontend_url()) or "http://localhost:5173"
 
 
+def _json_for_html(value) -> str:
+    """Serializes JSON safely for embedding inside HTML/script contexts by escaping HTML-sensitive chars."""
+    raw = json.dumps(value)
+    return (
+        raw.replace('&', '\\u0026')
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace("'", '\\u0027')
+        .replace('\u2028', '\\u2028')
+        .replace('\u2029', '\\u2029')
+    )
+
+
 def _render_oauth_callback_html(
     success: bool,
     message: str,
@@ -1217,15 +1230,21 @@ def _render_oauth_callback_html(
     qs = urlencode({"oauth_status": "success" if success else "error"})
     redirect_target = f"{resolved_origin}/?{qs}"
     safe_title = "Authorization Complete" if success else "Authorization Failed"
-    safe_body = html_lib.escape(message if success else (safe_err or message))
+    safe_body = html_lib.escape(message if success else (safe_err or message), quote=True)
     accent = "#10B981" if success else "#EF4444"
+    csp_nonce = secrets.token_urlsafe(16)
+    callback_config = {
+        "payload": payload,
+        "targetOrigin": resolved_origin,
+        "redirectUrl": redirect_target,
+    }
 
     page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>SocialSync OAuth - {safe_title}</title>
-  <style>
+  <style nonce="{csp_nonce}">
     body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1.5rem; }}
     .card {{ background: #1e293b; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 2rem; max-width: 460px; width: 100%; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.4); }}
     .pill {{ display: inline-block; padding: 0.35rem 0.9rem; border-radius: 999px; font-weight: 700; font-size: 0.82rem; background: {accent}22; color: {accent}; margin-bottom: 1rem; }}
@@ -1239,20 +1258,23 @@ def _render_oauth_callback_html(
     <div class="pill">{safe_title}</div>
     <h2>SocialSync Account Connection</h2>
     <p>{safe_body}</p>
-    <a class="btn" href="{html_lib.escape(redirect_target)}">Return to SocialSync</a>
+    <a class="btn" href="{html_lib.escape(redirect_target, quote=True)}">Return to SocialSync</a>
   </div>
-  <script>
+  <script id="oauth-callback-data" type="application/json">{_json_for_html(callback_config)}</script>
+  <script nonce="{csp_nonce}">
     (function() {{
-      var data = {json.dumps(payload)};
+      var dataEl = document.getElementById('oauth-callback-data');
+      var cfg = dataEl ? JSON.parse(dataEl.textContent) : null;
+      if (!cfg) return;
       try {{
         if (window.opener && !window.opener.closed) {{
-          window.opener.postMessage(data, {json.dumps(resolved_origin)});
+          window.opener.postMessage(cfg.payload, cfg.targetOrigin);
           setTimeout(function() {{ window.close(); }}, 1200);
           return;
         }}
       }} catch (e) {{}}
       setTimeout(function() {{
-        window.location.href = {json.dumps(redirect_target)};
+        window.location.href = cfg.redirectUrl;
       }}, 1500);
     }})();
   </script>
@@ -1261,6 +1283,17 @@ def _render_oauth_callback_html(
     resp = make_response(page_html, 200 if success else 400)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Content-Security-Policy"] = (
+        f"default-src 'none'; "
+        f"script-src 'nonce-{csp_nonce}'; "
+        f"style-src 'nonce-{csp_nonce}'; "
+        f"base-uri 'none'; "
+        f"form-action 'none'; "
+        f"frame-ancestors 'none'"
+    )
     return resp
 
 
@@ -1321,52 +1354,61 @@ def oauth_start(provider):
     return jsonify({"success": True, **res})
 
 
+_GENERIC_OAUTH_STATE_MESSAGE = "OAuth security state invalid, expired, or already used."
+_GENERIC_OAUTH_STATE_ERROR = "OAuth state replay/CSRF check failed. Please initiate connection again from Connected Accounts."
+
+
 @app.route('/api/oauth/<provider>/callback', methods=['GET'])
 def oauth_callback(provider):
     provider = provider.lower().strip()
-    req_origin_hint = request.headers.get('Origin')
     if provider not in ('facebook', 'instagram', 'youtube'):
-        return _render_oauth_callback_html(False, "Unsupported OAuth provider.", error="Unsupported provider.", target_origin=req_origin_hint)
-
-    err = request.args.get('error')
-    err_desc = request.args.get('error_description') or request.args.get('error_reason')
-    state = request.args.get('state')
-    target_origin = req_origin_hint
-    if state:
-        try:
-            peek = token_serializer.loads(state, max_age=900)
-            if isinstance(peek, dict) and peek.get('origin'):
-                target_origin = peek.get('origin')
-        except Exception:
-            pass
-
-    if err:
         return _render_oauth_callback_html(
             False,
-            "Authorization was cancelled or denied.",
-            error=redact_secrets(f"{err}: {err_desc or 'Access denied'}"),
-            target_origin=target_origin,
+            "Unsupported OAuth provider.",
+            error="Unsupported provider.",
         )
 
-    code = request.args.get('code')
-    if not code or not state:
-        return _render_oauth_callback_html(False, "Missing OAuth code or state parameter.", error="Invalid OAuth callback parameters.", target_origin=target_origin)
+    state = request.args.get('state')
+    if not state:
+        return _render_oauth_callback_html(
+            False,
+            _GENERIC_OAUTH_STATE_MESSAGE,
+            error=_GENERIC_OAUTH_STATE_ERROR,
+        )
 
     try:
         state_data = token_serializer.loads(state, max_age=900)
     except (SignatureExpired, BadTimeSignature, Exception):
-        return _render_oauth_callback_html(False, "OAuth state expired or invalid.", error="OAuth security state expired. Please try connecting again.", target_origin=target_origin)
+        return _render_oauth_callback_html(
+            False,
+            _GENERIC_OAUTH_STATE_MESSAGE,
+            error=_GENERIC_OAUTH_STATE_ERROR,
+        )
 
     if not isinstance(state_data, dict) or state_data.get('provider') != provider:
-        return _render_oauth_callback_html(False, "OAuth provider mismatch.", error="State provider mismatch.", target_origin=target_origin)
+        return _render_oauth_callback_html(
+            False,
+            _GENERIC_OAUTH_STATE_MESSAGE,
+            error=_GENERIC_OAUTH_STATE_ERROR,
+        )
 
-    target_origin = state_data.get('origin') or target_origin
     nonce = state_data.get('nonce')
     raw_uid = state_data.get('user_id')
-    if not nonce or not raw_uid:
-        return _render_oauth_callback_html(False, "Invalid OAuth security state.", error="Missing OAuth state nonce or user binding.", target_origin=target_origin)
+    if not isinstance(nonce, str) or not nonce or raw_uid is None or isinstance(raw_uid, bool):
+        return _render_oauth_callback_html(
+            False,
+            _GENERIC_OAUTH_STATE_MESSAGE,
+            error=_GENERIC_OAUTH_STATE_ERROR,
+        )
+    try:
+        user_id = int(raw_uid)
+    except (TypeError, ValueError):
+        return _render_oauth_callback_html(
+            False,
+            _GENERIC_OAUTH_STATE_MESSAGE,
+            error=_GENERIC_OAUTH_STATE_ERROR,
+        )
 
-    user_id = int(raw_uid)
     method = state_data.get('method')
     conn = get_db_connection()
 
@@ -1374,9 +1416,13 @@ def oauth_callback(provider):
         user_exists = conn.execute('SELECT id FROM users WHERE id = ?', (user_id,)).fetchone()
         if not user_exists:
             conn.close()
-            return _render_oauth_callback_html(False, "OAuth user account not found.", error="Invalid user in OAuth state.", target_origin=target_origin)
+            return _render_oauth_callback_html(
+                False,
+                _GENERIC_OAUTH_STATE_MESSAGE,
+                error=_GENERIC_OAUTH_STATE_ERROR,
+            )
 
-        # Enforce single-use server-side CSRF nonce atomically
+        # Enforce single-use server-side CSRF nonce atomically BEFORE reading error/code query params
         now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         consumed = conn.execute(
             '''
@@ -1391,8 +1437,32 @@ def oauth_callback(provider):
             conn.close()
             return _render_oauth_callback_html(
                 False,
-                "OAuth security state invalid, expired, or already used.",
-                error="OAuth state replay/CSRF check failed. Please initiate connection again from Connected Accounts.",
+                _GENERIC_OAUTH_STATE_MESSAGE,
+                error=_GENERIC_OAUTH_STATE_ERROR,
+            )
+
+        target_origin = state_data.get('origin')
+
+        err = request.args.get('error')
+        if err:
+            err_desc = request.args.get('error_description') or request.args.get('error_reason')
+            clean_err = redact_secrets(f"{err}: {err_desc or 'Access denied'}")
+            clean_err = ' '.join(clean_err.splitlines())[:300]
+            conn.close()
+            return _render_oauth_callback_html(
+                False,
+                "Authorization was cancelled or denied.",
+                error=clean_err,
+                target_origin=target_origin,
+            )
+
+        code = request.args.get('code')
+        if not code:
+            conn.close()
+            return _render_oauth_callback_html(
+                False,
+                "Missing OAuth authorization code.",
+                error="Missing OAuth authorization code.",
                 target_origin=target_origin,
             )
 
