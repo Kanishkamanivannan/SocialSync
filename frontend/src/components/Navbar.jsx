@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sun, 
   Moon, 
@@ -6,10 +6,14 @@ import {
   PlusCircle, 
   Search, 
   CheckCircle2, 
-  X,
-  Menu,
-  ChevronDown
+  X, 
+  Menu, 
+  ChevronDown,
+  Target,
+  Share2,
+  FileText
 } from 'lucide-react';
+import { api, isSafeHttpUrl } from '../services/api';
 
 export default function Navbar({ 
   currentTab, 
@@ -18,10 +22,14 @@ export default function Navbar({
   setIsDark, 
   user,
   activity = [],
+  onSearchSelect,
   onOpenMobileMenu
 }) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchContainerRef = useRef(null);
 
   const pageHeaders = {
     dashboard: { 
@@ -58,6 +66,53 @@ export default function Navbar({
     title: 'SocialSync', 
     desc: 'Manage • Create • Grow' 
   };
+
+  // Close search popover when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(event.target)) {
+        setSearchResults(null);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Debounced search
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const res = await api.search(searchQuery.trim());
+        setSearchResults(res);
+      } catch (err) {
+        console.error('Search error:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const handleSelectResult = (type, item) => {
+    setSearchResults(null);
+    setSearchQuery('');
+    if (onSearchSelect) {
+      onSearchSelect(type, item);
+    }
+  };
+
+  const hasResults = searchResults && (
+    (searchResults.posts?.length > 0) || 
+    (searchResults.accounts?.length > 0) || 
+    (searchResults.campaigns?.length > 0)
+  );
 
   return (
     <header style={{
@@ -103,8 +158,12 @@ export default function Navbar({
 
       {/* Right: Search, Create Post Button, Theme Toggle, Notifications, Profile */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
-        {/* Search */}
-        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }} className="nav-search-bar">
+        {/* Search Input with Live Dropdown */}
+        <div 
+          ref={searchContainerRef} 
+          style={{ position: 'relative', display: 'flex', alignItems: 'center' }} 
+          className="nav-search-bar"
+        >
           <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px' }} />
           <input
             type="text"
@@ -112,16 +171,157 @@ export default function Navbar({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
-              padding: '0.5rem 1rem 0.5rem 2.2rem',
+              padding: '0.5rem 2rem 0.5rem 2.2rem',
               borderRadius: 'var(--radius-md)',
               border: '1px solid var(--border-light)',
               backgroundColor: 'var(--bg-muted)',
               color: 'var(--text-primary)',
               fontSize: '0.85rem',
-              width: '210px',
+              width: '230px',
               outline: 'none'
             }}
           />
+          {searchQuery && (
+            <button
+              onClick={() => { setSearchQuery(''); setSearchResults(null); }}
+              style={{
+                position: 'absolute',
+                right: '8px',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '2px'
+              }}
+            >
+              <X size={14} />
+            </button>
+          )}
+
+          {/* Search Results Dropdown */}
+          {searchResults && (
+            <div
+              className="clean-card"
+              style={{
+                position: 'absolute',
+                top: '46px',
+                left: 0,
+                width: '340px',
+                maxHeight: '380px',
+                overflowY: 'auto',
+                zIndex: 60,
+                padding: '0.85rem',
+                boxShadow: 'var(--shadow-lg)'
+              }}
+            >
+              {isSearching ? (
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', padding: '0.5rem' }}>
+                  Searching...
+                </div>
+              ) : !hasResults ? (
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', padding: '0.5rem', textAlign: 'center' }}>
+                  No matching posts, accounts, or campaigns found for "{searchQuery}".
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {/* Posts Results */}
+                  {searchResults.posts?.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.35rem' }}>
+                        Posts ({searchResults.posts.length})
+                      </div>
+                      {searchResults.posts.map(p => (
+                        <div
+                          key={p.id}
+                          onClick={() => handleSelectResult('post', p)}
+                          style={{
+                            padding: '0.45rem 0.6rem',
+                            borderRadius: 'var(--radius-sm)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            fontSize: '0.82rem',
+                            backgroundColor: 'var(--bg-surface)',
+                            transition: 'background 0.15s ease'
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-muted)'}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface)'}
+                        >
+                          <FileText size={14} color="var(--primary)" style={{ flexShrink: 0 }} />
+                          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {p.content}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Accounts Results */}
+                  {searchResults.accounts?.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.35rem' }}>
+                        Social Accounts ({searchResults.accounts.length})
+                      </div>
+                      {searchResults.accounts.map(a => (
+                        <div
+                          key={a.id}
+                          onClick={() => handleSelectResult('account', a)}
+                          style={{
+                            padding: '0.45rem 0.6rem',
+                            borderRadius: 'var(--radius-sm)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            fontSize: '0.82rem',
+                            backgroundColor: 'var(--bg-surface)',
+                            transition: 'background 0.15s ease'
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-muted)'}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface)'}
+                        >
+                          <Share2 size={14} color="var(--success)" style={{ flexShrink: 0 }} />
+                          <span><strong>{a.platform}</strong> ({a.handle})</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Campaigns Results */}
+                  {searchResults.campaigns?.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.35rem' }}>
+                        Campaigns ({searchResults.campaigns.length})
+                      </div>
+                      {searchResults.campaigns.map(c => (
+                        <div
+                          key={c.id}
+                          onClick={() => handleSelectResult('campaign', c)}
+                          style={{
+                            padding: '0.45rem 0.6rem',
+                            borderRadius: 'var(--radius-sm)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            fontSize: '0.82rem',
+                            backgroundColor: 'var(--bg-surface)',
+                            transition: 'background 0.15s ease'
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-muted)'}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface)'}
+                        >
+                          <Target size={14} color="var(--warning)" style={{ flexShrink: 0 }} />
+                          <span>{c.title}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Primary Create Post Button */}
@@ -256,7 +456,7 @@ export default function Navbar({
           title="Account Settings"
         >
           <img 
-            src={user?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80"} 
+            src={isSafeHttpUrl(user?.avatar) ? user.avatar : "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80"} 
             alt="Avatar" 
             style={{ width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover' }}
           />

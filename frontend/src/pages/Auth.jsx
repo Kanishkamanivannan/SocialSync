@@ -3,6 +3,10 @@ import logoLight from '../assets/logo.png';
 import { api } from '../services/api';
 import { Mail, Lock, User, ArrowRight, Eye, EyeOff, AlertCircle, CheckCircle2, Sparkles } from 'lucide-react';
 
+const DEMO_EMAIL = import.meta.env.DEV ? (import.meta.env.VITE_DEMO_EMAIL || '') : '';
+const DEMO_PASSWORD = import.meta.env.DEV ? (import.meta.env.VITE_DEMO_PASSWORD || '') : '';
+const DEMO_LOGIN_ENABLED = import.meta.env.DEV && Boolean(DEMO_EMAIL && DEMO_PASSWORD);
+
 export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
   const [isLogin, setIsLogin] = useState(initialMode === 'login');
   const [name, setName] = useState('');
@@ -52,7 +56,7 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
         if (res && res.success) {
           onAuthSuccess(res.user);
         } else {
-          setGeneralError(res?.message || 'Invalid email or password. Use the Quick Demo button below to sign in instantly.');
+          setGeneralError(res?.message || 'Invalid email or password.');
         }
       } else {
         const res = await api.register(name, email, password);
@@ -63,31 +67,33 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
         }
       }
     } catch (err) {
-      setGeneralError('Backend is offline. Switching to local offline demo mode.');
-      const demoUser = {
-        id: 1,
-        name: name || 'Alex Morgan',
-        email,
-        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-        role: 'Social Media Manager'
-      };
-      onAuthSuccess(demoUser);
+      setGeneralError(err?.message || 'Unable to reach SocialSync backend server. Start the Flask backend and try again.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleQuickDemo = () => {
-    setEmail('alex@socialsync.io');
-    setPassword('password123');
+    if (!DEMO_LOGIN_ENABLED) return;
+    setEmail(DEMO_EMAIL);
+    setPassword(DEMO_PASSWORD);
     setErrors({});
     setGeneralError('');
     setLoading(true);
     setTimeout(async () => {
-      const res = await api.login('alex@socialsync.io', 'password123');
-      onAuthSuccess(res.user);
-      setLoading(false);
-    }, 300);
+      try {
+        const res = await api.login(DEMO_EMAIL, DEMO_PASSWORD);
+        if (res && res.success) {
+          onAuthSuccess(res.user);
+        } else {
+          setGeneralError(res?.message || 'Demo login failed.');
+        }
+      } catch (err) {
+        setGeneralError(err?.message || 'Unable to reach SocialSync backend server.');
+      } finally {
+        setLoading(false);
+      }
+    }, 200);
   };
 
   const handleForgotPassword = () => {
@@ -253,7 +259,7 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
               <Mail size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '12px' }} />
               <input
                 type="email"
-                placeholder="alex@socialsync.io"
+                placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className="form-input"
@@ -330,74 +336,34 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
           </button>
         </form>
 
-        {/* 1-Click Quick Demo Login */}
-        <div style={{ marginTop: '1.25rem' }}>
-          <button
-            type="button"
-            onClick={handleQuickDemo}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              borderRadius: 'var(--radius-md)',
-              border: '1.5px dashed var(--primary)',
-              backgroundColor: 'var(--lavender)',
-              color: 'var(--primary)',
-              fontWeight: 700,
-              fontSize: '0.88rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '0.5rem',
-              cursor: 'pointer',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <Sparkles size={16} />
-            <span>1-Click Quick Demo Login (Alex Morgan)</span>
-          </button>
-        </div>
-
-        {/* Social Logins Notice */}
-        <div style={{ marginTop: '1.75rem', textAlign: 'center' }}>
-          <div style={{
-            position: 'relative',
-            marginBottom: '1rem'
-          }}>
-            <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: '1px', backgroundColor: 'var(--border-light)' }} />
-            <span style={{
-              position: 'relative',
-              backgroundColor: 'var(--bg-surface)',
-              padding: '0 0.65rem',
-              fontSize: '0.75rem',
-              color: 'var(--text-muted)',
-              fontWeight: 600
-            }}>
-              Or sign in with (Preview)
-            </span>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem' }}>
+        {/* Optional Dev-Only Demo Login (excluded from production builds) */}
+        {DEMO_LOGIN_ENABLED && (
+          <div style={{ marginTop: '1.25rem' }}>
             <button
               type="button"
               onClick={handleQuickDemo}
-              className="btn-secondary"
-              style={{ padding: '0.55rem', fontSize: '0.82rem' }}
+              style={{
+                width: '100%',
+                padding: '0.75rem',
+                borderRadius: 'var(--radius-md)',
+                border: '1.5px dashed var(--primary)',
+                backgroundColor: 'var(--lavender)',
+                color: 'var(--primary)',
+                fontWeight: 700,
+                fontSize: '0.88rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.5rem',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease'
+              }}
             >
-              Google
-            </button>
-            <button
-              type="button"
-              onClick={handleQuickDemo}
-              className="btn-secondary"
-              style={{ padding: '0.55rem', fontSize: '0.82rem' }}
-            >
-              Apple
+              <Sparkles size={16} />
+              <span>Dev Demo Login</span>
             </button>
           </div>
-          <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-            Social logins are UI previews. Click any button to enter as demo user.
-          </p>
-        </div>
+        )}
       </div>
     </div>
   );

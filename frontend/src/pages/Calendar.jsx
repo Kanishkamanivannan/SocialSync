@@ -1,50 +1,78 @@
 import React, { useState } from 'react';
-import { 
-  Calendar as CalendarIcon, 
-  Clock, 
-  CheckCircle2, 
-  FileText, 
-  Trash2, 
-  Edit3, 
-  Eye, 
-  Plus, 
-  X, 
-  ChevronLeft, 
-  ChevronRight, 
-  Info, 
+import {
+  Calendar as CalendarIcon,
+  Clock,
+  CheckCircle2,
+  Trash2,
+  Edit3,
+  Eye,
+  Plus,
+  X,
+  ChevronLeft,
+  ChevronRight,
+  Info,
+  CalendarDays,
   AlertCircle,
-  Share2,
-  CalendarDays
+  ExternalLink
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, isSafeHttpUrl } from '../services/api';
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'
 ];
 
+function getStatusBadgeClass(status) {
+  if (status === 'published') return 'badge-success';
+  if (status === 'scheduled') return 'badge-primary';
+  if (status === 'failed') return 'badge-danger';
+  return 'badge-warning';
+}
+
+function getStatusDotColor(status) {
+  if (status === 'published') return 'var(--success)';
+  if (status === 'scheduled') return 'var(--primary)';
+  if (status === 'failed') return 'var(--danger)';
+  return 'var(--warning)';
+}
+
+function getPublishModeLabel(publishMode) {
+  return publishMode === 'live' ? 'LIVE API' : 'SANDBOX';
+}
+
 export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onNavigate }) {
-  const [filter, setFilter] = useState('all'); // 'all', 'scheduled', 'published', 'draft'
-  
-  // Default to October 2026 based on mock posts and current date context
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(9); // 0-indexed, 9 = October
-  const [selectedDate, setSelectedDate] = useState('2026-10-14');
+  const [filter, setFilter] = useState('all'); // 'all', 'scheduled', 'published', 'partial', 'failed', 'draft'
+
+  const todayObj = new Date();
+  const todayYear = todayObj.getFullYear();
+  const todayMonth = todayObj.getMonth();
+  const todayDay = todayObj.getDate();
+
+  // Dynamic initialization to current real-time month, year and date
+  const [currentYear, setCurrentYear] = useState(todayYear);
+  const [currentMonth, setCurrentMonth] = useState(todayMonth);
+  const [selectedDate, setSelectedDate] = useState(() => {
+    return `${todayYear}-${String(todayMonth + 1).padStart(2, '0')}-${String(todayDay).padStart(2, '0')}`;
+  });
 
   // Modals state
   const [viewingPost, setViewingPost] = useState(null);
   const [editingPost, setEditingPost] = useState(null);
   const [editContent, setEditContent] = useState('');
   const [editStatus, setEditStatus] = useState('scheduled');
+  const [editPublishMode, setEditPublishMode] = useState('sandbox');
   const [editDate, setEditDate] = useState('');
+  const [editErrorMsg, setEditErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState(null);
 
   // Status explanations for beginners
   const statusDescriptions = {
-    all: 'Showing all content across your calendar: scheduled posts, published posts, and saved drafts.',
-    scheduled: 'Scheduled: Posts queued to automatically release at their designated date and time.',
-    published: 'Published: Content that is currently live and viewable by your audience.',
+    all: 'Showing all content across your calendar: scheduled, published, partial, failed, and draft posts.',
+    scheduled: 'Scheduled: Posts queued to automatically release at their designated date and time (Live or Sandbox).',
+    published: 'Published: Content completed either via Live Official APIs or Sandbox Simulation (see mode pill).',
+    partial: 'Partial: Live post succeeded on one or more channels but failed on at least one channel.',
+    failed: 'Failed: Live publishing failed with an API or OAuth validation error. Inspect details to fix & retry.',
     draft: 'Drafts: Ideas and work-in-progress posts saved for future refinement.'
   };
 
@@ -79,7 +107,9 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     setEditingPost(post);
     setEditContent(post.content);
     setEditStatus(post.status);
+    setEditPublishMode(post.publish_mode === 'live' ? 'live' : 'sandbox');
     setEditDate(post.scheduled_for ? post.scheduled_for.replace(' ', 'T').substring(0, 16) : '');
+    setEditErrorMsg('');
   };
 
   const handleSaveEdit = async (e) => {
@@ -87,19 +117,28 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     if (!editingPost) return;
 
     setLoading(true);
+    setEditErrorMsg('');
     try {
       const updated = await api.updatePost(editingPost.id, {
         content: editContent,
         status: editStatus,
+        publish_mode: editPublishMode,
         scheduled_for: editDate ? editDate.replace('T', ' ') + ':00' : null
       });
       if (onPostUpdated) onPostUpdated(updated);
       setEditingPost(null);
-      setFeedback('Post updated successfully!');
-      setTimeout(() => setFeedback(null), 3000);
+      setFeedback(
+        updated.status === 'partial'
+          ? `Post partially published (${updated.publish_mode?.toUpperCase()}): ${updated.error_message || 'Check View modal for channel details.'}`
+          : 'Post updated successfully!'
+      );
+      setTimeout(() => setFeedback(null), 4000);
     } catch (err) {
       console.error(err);
-      alert('Failed to update post.');
+      if (err.data?.id && onPostUpdated) {
+        onPostUpdated(err.data);
+      }
+      setEditErrorMsg(err.data?.error_message || err.message || 'Failed to update post.');
     } finally {
       setLoading(false);
     }
@@ -173,6 +212,8 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
             { id: 'all', label: 'All Content', count: posts.length },
             { id: 'scheduled', label: 'Scheduled', count: posts.filter(p => p.status === 'scheduled').length },
             { id: 'published', label: 'Published', count: posts.filter(p => p.status === 'published').length },
+            { id: 'partial', label: 'Partial', count: posts.filter(p => p.status === 'partial').length },
+            { id: 'failed', label: 'Failed', count: posts.filter(p => p.status === 'failed').length },
             { id: 'draft', label: 'Drafts', count: posts.filter(p => p.status === 'draft').length },
           ].map(tab => (
             <button
@@ -275,9 +316,11 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
               </button>
               <button
                 onClick={() => {
-                  setCurrentMonth(9);
-                  setCurrentYear(2026);
-                  setSelectedDate('2026-10-14');
+                  const now = new Date();
+                  setCurrentMonth(now.getMonth());
+                  setCurrentYear(now.getFullYear());
+                  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                  setSelectedDate(dateStr);
                 }}
                 className="btn-secondary"
                 style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', fontWeight: 600 }}
@@ -318,31 +361,31 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
             gridTemplateColumns: 'repeat(7, 1fr)',
             gap: '4px'
           }}>
-            {/* Empty slots before first day */}
-            {Array.from({ length: firstDayIndex }).map((_, i) => (
-              <div 
-                key={`empty-${i}`} 
-                style={{ 
-                  height: '56px', 
-                  backgroundColor: 'var(--bg-muted)', 
-                  borderRadius: 'var(--radius-sm)',
-                  opacity: 0.25 
-                }} 
-              />
-            ))}
+                {/* Empty slots before first day */}
+                {Array.from({ length: firstDayIndex }).map((_, i) => (
+                  <div 
+                    key={`empty-${i}`} 
+                    style={{ 
+                      height: '56px', 
+                      backgroundColor: 'var(--bg-muted)', 
+                      borderRadius: 'var(--radius-sm)',
+                      opacity: 0.25 
+                    }} 
+                  />
+                ))}
 
-            {/* Actual Days of the Month */}
-            {Array.from({ length: daysInMonth }).map((_, i) => {
-              const day = i + 1;
-              const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-              const dayPosts = getPostsForDay(day);
-              const isToday = currentMonth === 9 && currentYear === 2026 && day === 14;
-              const isSelected = selectedDate === dateStr;
+                {/* Actual Days of the Month */}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                  const dayPosts = getPostsForDay(day);
+                  const isToday = currentMonth === todayMonth && currentYear === todayYear && day === todayDay;
+                  const isSelected = selectedDate === dateStr;
 
-              return (
-                <div
-                  key={`day-${day}`}
-                  onClick={() => setSelectedDate(dateStr)}
+                  return (
+                    <div
+                      key={`day-${day}`}
+                      onClick={() => setSelectedDate(dateStr)}
                   style={{
                     height: '56px',
                     backgroundColor: isSelected 
@@ -404,8 +447,7 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                           width: '6px',
                           height: '6px',
                           borderRadius: '50%',
-                          backgroundColor: p.status === 'published' ? 'var(--success)' :
-                                           p.status === 'scheduled' ? 'var(--primary)' : 'var(--warning)',
+                          backgroundColor: getStatusDotColor(p.status),
                           display: 'inline-block'
                         }}
                       />
@@ -498,11 +540,11 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                        <span className={`badge ${
-                          post.status === 'published' ? 'badge-success' : 
-                          post.status === 'scheduled' ? 'badge-primary' : 'badge-warning'
-                        }`} style={{ fontSize: '0.68rem', padding: '2px 7px' }}>
+                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.68rem', padding: '2px 7px' }}>
                           {post.status.toUpperCase()}
+                        </span>
+                        <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.64rem', padding: '2px 6px' }}>
+                          {getPublishModeLabel(post.publish_mode)}
                         </span>
                         {platforms.map((pl, idx) => (
                           <span key={idx} className="badge badge-neutral" style={{ fontSize: '0.68rem', padding: '2px 6px' }}>
@@ -635,13 +677,15 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                   }}
                 >
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                      <span className={`badge ${
-                        post.status === 'published' ? 'badge-success' : 
-                        post.status === 'scheduled' ? 'badge-primary' : 'badge-warning'
-                      }`} style={{ fontSize: '0.7rem' }}>
-                        {post.status.toUpperCase()}
-                      </span>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem', gap: '0.35rem', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.7rem' }}>
+                          {post.status.toUpperCase()}
+                        </span>
+                        <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.64rem' }}>
+                          {getPublishModeLabel(post.publish_mode)}
+                        </span>
+                      </div>
                       <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                         <Clock size={12} />
                         {dateDisplay}
@@ -754,17 +798,24 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
               </button>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <span className={`badge ${
-                  viewingPost.status === 'published' ? 'badge-success' : 
-                  viewingPost.status === 'scheduled' ? 'badge-primary' : 'badge-warning'
-                }`}>
-                  {viewingPost.status.toUpperCase()}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <span className={`badge ${getStatusBadgeClass(viewingPost.status)}`}>
+                    {viewingPost.status.toUpperCase()}
+                  </span>
+                  <span className={`badge ${viewingPost.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`}>
+                    {getPublishModeLabel(viewingPost.publish_mode)}
+                  </span>
+                  {viewingPost.media_type && viewingPost.media_type !== 'none' && (
+                    <span className="badge badge-neutral" style={{ textTransform: 'uppercase' }}>
+                      {viewingPost.media_type}
+                    </span>
+                  )}
+                </div>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <Clock size={14} />
-                  {viewingPost.scheduled_for || viewingPost.created_at || 'Not scheduled'}
+                  {viewingPost.scheduled_for || viewingPost.published_at || viewingPost.created_at || 'Not scheduled'}
                 </span>
               </div>
 
@@ -782,18 +833,93 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                 </div>
               </div>
 
+              {/* Media Preview */}
+              {isSafeHttpUrl(viewingPost.media_url, true) && (
+                <div style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden', maxHeight: '240px', backgroundColor: '#000' }}>
+                  {viewingPost.media_type === 'video' ? (
+                    <video src={viewingPost.media_url} controls style={{ width: '100%', maxHeight: '240px', display: 'block' }} />
+                  ) : (
+                    <img src={viewingPost.media_url} alt="Post attachment" style={{ width: '100%', maxHeight: '240px', objectFit: 'cover', display: 'block' }} />
+                  )}
+                </div>
+              )}
+
               {/* Post Content Box */}
               <div style={{
                 backgroundColor: 'var(--bg-muted)',
-                padding: '1.25rem',
+                padding: '1.15rem',
                 borderRadius: 'var(--radius-md)',
-                fontSize: '0.95rem',
+                fontSize: '0.94rem',
                 lineHeight: 1.6,
                 color: 'var(--text-primary)',
                 whiteSpace: 'pre-wrap'
               }}>
+                {viewingPost.video_title && (
+                  <div style={{ fontWeight: 700, marginBottom: '0.4rem' }}>{viewingPost.video_title}</div>
+                )}
                 {viewingPost.content}
               </div>
+
+              {/* Top-Level Error Message if failed/partial */}
+              {viewingPost.error_message && (
+                <div style={{
+                  backgroundColor: 'var(--danger-bg)',
+                  color: 'var(--danger)',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '0.45rem'
+                }}>
+                  <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <span>{viewingPost.error_message}</span>
+                </div>
+              )}
+
+              {/* Per-Platform Publishing Telemetry / API Results */}
+              {Array.isArray(viewingPost.publish_results) && viewingPost.publish_results.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+                    Per-Channel Publishing Log:
+                  </span>
+                  {viewingPost.publish_results.map((r, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        fontSize: '0.77rem',
+                        padding: '0.45rem 0.65rem',
+                        borderRadius: 'var(--radius-sm)',
+                        backgroundColor: r.success ? 'var(--success-bg)' : 'var(--danger-bg)',
+                        color: r.success ? 'var(--success)' : 'var(--danger)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                        flexWrap: 'wrap'
+                      }}
+                    >
+                      <span>
+                        <strong>{r.platform}:</strong>{' '}
+                        {r.success
+                          ? (r.simulated ? 'Simulated in Sandbox' : `Published (${r.external_post_id || 'Live'})`)
+                          : (r.error || 'Failed')}
+                      </span>
+                      {isSafeHttpUrl(r.permalink) && (
+                        <a
+                          href={r.permalink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'inherit', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'underline' }}
+                        >
+                          <span>View Live</span>
+                          <ExternalLink size={11} />
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '0.5rem' }}>
                 <button
@@ -862,7 +988,23 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
               </button>
             </div>
 
-            <form onSubmit={handleSaveEdit} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <form onSubmit={handleSaveEdit} style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+              {editErrorMsg && (
+                <div style={{
+                  backgroundColor: 'var(--danger-bg)',
+                  color: 'var(--danger)',
+                  padding: '0.65rem 0.85rem',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.45rem'
+                }}>
+                  <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                  <span>{editErrorMsg}</span>
+                </div>
+              )}
+
               <div className="form-group">
                 <label className="form-label">Post Content</label>
                 <textarea
@@ -874,17 +1016,31 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                 />
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Status</label>
-                <select
-                  value={editStatus}
-                  onChange={(e) => setEditStatus(e.target.value)}
-                  className="form-input"
-                >
-                  <option value="draft">Draft (Saved for review)</option>
-                  <option value="scheduled">Scheduled (Will publish automatically)</option>
-                  <option value="published">Published (Live now)</option>
-                </select>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                <div className="form-group">
+                  <label className="form-label">Status</label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value)}
+                    className="form-input"
+                  >
+                    <option value="draft">Draft (Saved for review)</option>
+                    <option value="scheduled">Scheduled (Auto-run at time)</option>
+                    <option value="published">Published (Execute now)</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Publish Mode</label>
+                  <select
+                    value={editPublishMode}
+                    onChange={(e) => setEditPublishMode(e.target.value)}
+                    className="form-input"
+                  >
+                    <option value="sandbox">Sandbox Mode (Simulation)</option>
+                    <option value="live">Live Mode (Official APIs)</option>
+                  </select>
+                </div>
               </div>
 
               {editStatus === 'scheduled' && (

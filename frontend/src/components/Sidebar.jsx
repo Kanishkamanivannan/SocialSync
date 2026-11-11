@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import logoLight from '../assets/logo.png';
 import logoWhite from '../assets/logo-white.png';
+import { isSafeHttpUrl } from '../services/api';
 
 export default function Sidebar({ currentTab, setCurrentTab, user, onLogout, isDark, isMobile, onCloseMobile }) {
   const navItems = [
@@ -184,7 +185,7 @@ export default function Sidebar({ currentTab, setCurrentTab, user, onLogout, isD
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0 }}>
             <img 
-              src={user?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80"} 
+              src={isSafeHttpUrl(user?.avatar) ? user.avatar : "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80"} 
               alt={user?.name || "User Avatar"} 
               style={{ width: '36px', height: '36px', borderRadius: '50%', objectFit: 'cover' }}
             />

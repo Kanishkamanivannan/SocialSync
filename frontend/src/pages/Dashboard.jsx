@@ -1,11 +1,13 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { 
   Users, 
   Eye, 
   Heart, 
   Send, 
   Clock, 
-  CheckCircle2
+  CheckCircle2,
+  ArrowRight,
+  Plus
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -18,40 +20,58 @@ export default function Dashboard({
   const scheduledPosts = posts.filter(p => p.status === 'scheduled');
   const publishedPosts = posts.filter(p => p.status === 'published');
 
-  const getGreeting = () => {
+  const greeting = useMemo(() => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
     if (hour < 18) return 'Good afternoon';
     return 'Good evening';
-  };
+  }, []);
 
   const displayName = user?.name ? user.name.split(' ')[0] : 'User';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2.25rem' }} className="animate-fade-in">
-      {/* Top Welcome Header - Clean & Spacious without duplicate action buttons */}
+      {/* Top Welcome Header */}
       <div style={{
         padding: '0.5rem 0',
         display: 'flex',
-        flexDirection: 'column',
-        gap: '0.35rem'
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '1rem'
       }}>
-        <h2 style={{ fontSize: '1.75rem', fontWeight: 800, margin: 0, letterSpacing: '-0.02em' }}>
-          {getGreeting()}, {displayName}! 👋
-        </h2>
-        <p style={{ margin: 0, fontSize: '0.98rem', color: 'var(--text-secondary)' }}>
-          Here's what's happening with your social media today.
-        </p>
+        <div>
+          <h2 style={{ fontSize: '1.75rem', fontWeight: 800, margin: 0, letterSpacing: '-0.02em' }}>
+            {greeting}, {displayName}! 👋
+          </h2>
+          <p style={{ margin: 0, fontSize: '0.98rem', color: 'var(--text-secondary)' }}>
+            Here's what's happening with your social media today.
+          </p>
+        </div>
+
+        <button
+          onClick={() => onNavigate('compose')}
+          className="btn-primary"
+          style={{ padding: '0.6rem 1.3rem', fontSize: '0.88rem' }}
+        >
+          <Plus size={16} />
+          <span>New Post</span>
+        </button>
       </div>
 
-      {/* 4 Spacious Metric Cards (Each metric appears only once) */}
+      {/* 4 Spacious Metric Cards */}
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
         gap: '1.5rem'
       }}>
         {/* Metric 1: Total Audience */}
-        <div className="clean-card" style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+        <div 
+          className="clean-card" 
+          onClick={() => onNavigate('accounts')}
+          style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', cursor: 'pointer' }}
+          title="Click to view connected accounts"
+        >
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
               <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
@@ -71,18 +91,24 @@ export default function Dashboard({
               </div>
             </div>
             <div style={{ fontSize: '2.1rem', fontWeight: 800, marginBottom: '0.4rem', color: 'var(--text-primary)' }}>
-              {(analytics?.summary?.total_followers || 514500).toLocaleString()}
+              {(analytics?.summary?.total_followers ?? 0).toLocaleString()}
             </div>
           </div>
-          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem' }}>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
-              The total number of people following your profiles across all channels.
+          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+              Across all connected channels
             </p>
+            <ArrowRight size={14} color="var(--primary)" />
           </div>
         </div>
 
         {/* Metric 2: Total Reach */}
-        <div className="clean-card" style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+        <div 
+          className="clean-card"
+          onClick={() => onNavigate('analytics')}
+          style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', cursor: 'pointer' }}
+          title="Click to view detailed analytics"
+        >
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
               <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
@@ -102,18 +128,24 @@ export default function Dashboard({
               </div>
             </div>
             <div style={{ fontSize: '2.1rem', fontWeight: 800, marginBottom: '0.4rem', color: 'var(--text-primary)' }}>
-              {(analytics?.summary?.total_reach || 854000).toLocaleString()}
+              {(analytics?.summary?.total_reach ?? 0).toLocaleString()}
             </div>
           </div>
-          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem' }}>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
-              Reach means the number of people who saw your content.
+          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+              Estimated viewers across campaigns
             </p>
+            <ArrowRight size={14} color="var(--info)" />
           </div>
         </div>
 
         {/* Metric 3: Engagement Rate */}
-        <div className="clean-card" style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+        <div 
+          className="clean-card"
+          onClick={() => onNavigate('analytics')}
+          style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', cursor: 'pointer' }}
+          title="Click to view detailed analytics"
+        >
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
               <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
@@ -133,18 +165,24 @@ export default function Dashboard({
               </div>
             </div>
             <div style={{ fontSize: '2.1rem', fontWeight: 800, marginBottom: '0.4rem', color: 'var(--text-primary)' }}>
-              {analytics?.summary?.engagement_rate || '6.4%'}
+              {analytics?.summary?.engagement_rate ?? '0%'}
             </div>
           </div>
-          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem' }}>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
-              The percentage of viewers who liked, commented, or shared your posts.
+          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+              Average viewer action percentage
             </p>
+            <ArrowRight size={14} color="var(--warning)" />
           </div>
         </div>
 
         {/* Metric 4: Published Posts */}
-        <div className="clean-card" style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+        <div 
+          className="clean-card"
+          onClick={() => onNavigate('calendar')}
+          style={{ padding: '1.75rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', cursor: 'pointer' }}
+          title="Click to view posts calendar"
+        >
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
               <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
@@ -164,13 +202,14 @@ export default function Dashboard({
               </div>
             </div>
             <div style={{ fontSize: '2.1rem', fontWeight: 800, marginBottom: '0.4rem', color: 'var(--text-primary)' }}>
-              {publishedPosts.length || 2}
+              {publishedPosts.length}
             </div>
           </div>
-          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem' }}>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
-              Total number of live posts currently active on your channels.
+          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.85rem', marginTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+              {`${publishedPosts.filter(p => p.publish_mode === 'live').length} Live API · ${publishedPosts.filter(p => p.publish_mode !== 'live').length} Sandbox`}
             </p>
+            <ArrowRight size={14} color="var(--success)" />
           </div>
         </div>
       </div>
@@ -187,9 +226,16 @@ export default function Dashboard({
             <div>
               <h3 style={{ fontSize: '1.2rem', margin: 0 }}>Upcoming Scheduled Posts</h3>
               <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', margin: 0, marginTop: '2px' }}>
-                Posts that will publish automatically at their scheduled times
+                Posts that publish automatically at their scheduled times
               </p>
             </div>
+            <button
+              onClick={() => onNavigate('calendar')}
+              className="btn-secondary"
+              style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+            >
+              View Calendar
+            </button>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -202,6 +248,14 @@ export default function Dashboard({
                 <div className="empty-state-desc">
                   When you schedule content in Create Post, it will appear right here with its countdown.
                 </div>
+                <button
+                  onClick={() => onNavigate('compose')}
+                  className="btn-primary"
+                  style={{ padding: '0.45rem 1rem', fontSize: '0.82rem' }}
+                >
+                  <Plus size={14} />
+                  <span>Schedule Content</span>
+                </button>
               </div>
             ) : (
               scheduledPosts.slice(0, 4).map(post => {
@@ -219,8 +273,11 @@ export default function Dashboard({
                       gap: '0.5rem'
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.4rem' }}>
                       <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.68rem' }}>
+                          {post.publish_mode === 'live' ? 'LIVE API' : 'SANDBOX'}
+                        </span>
                         {platforms.map((pl, idx) => (
                           <span key={idx} className="badge badge-primary" style={{ fontSize: '0.72rem' }}>
                             {pl}
@@ -249,10 +306,10 @@ export default function Dashboard({
             <div>
               <h3 style={{ fontSize: '1.2rem', margin: 0 }}>Recent Activity</h3>
               <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', margin: 0, marginTop: '2px' }}>
-                Chronological updates from your connected channels
+                Chronological updates from Live APIs and Sandbox actions
               </p>
             </div>
-            <span className="badge badge-success">Live Log</span>
+            <span className="badge badge-primary">Activity Log</span>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>

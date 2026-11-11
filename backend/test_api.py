@@ -1,0 +1,878 @@
+"""
+Comprehensive Automated Test Suite for SocialSync API
+Tests authentication, authorization, CRUD, upload, analytics, accounts, campaigns, and scheduler.
+"""
+
+import sys
+import os
+import io
+import time
+from datetime import datetime, timedelta
+
+# Ensure backend directory is in path
+sys.path.insert(0, os.path.dirname(__file__))
+
+from app import app
+from database import get_db_connection
+
+def run_tests():
+    client = app.test_client()
+    passed = 0
+    failed = 0
+
+    def assert_test(name, condition, details=""):
+        nonlocal passed, failed
+        if condition:
+            print(f"  [PASS] {name}")
+            passed += 1
+        else:
+            print(f"  [FAIL] {name} - {details}")
+            failed += 1
+
+    print("==================================================")
+    print("      SOCIALSYNC FULL-STACK TEST RUNNER")
+    print("==================================================")
+
+    # 1. Health check
+    print("\n--- 1. Health & Server Status ---")
+    res = client.get('/api/health')
+    assert_test("Health endpoint returns 200", res.status_code == 200)
+    data = res.get_json()
+    assert_test("Database is SQLite", data.get('database') == 'SQLite')
+    assert_test("Scheduler is active", data.get('scheduler') == 'active')
+
+    # 2. Authentication & Security
+    print("\n--- 2. Authentication & Security ---")
+    # Test invalid login
+    res = client.post('/api/auth/login', json={'email': 'nonexistent@user.com', 'password': 'wrongpassword'})
+    assert_test("Invalid login rejected with 401", res.status_code == 401)
+
+    # Test valid login with demo user
+    res = client.post('/api/auth/login', json={'email': 'alex@socialsync.io', 'password': 'password123'})
+    assert_test("Valid login returns 200", res.status_code == 200)
+    auth_data = res.get_json()
+    assert_test("Login returns user data", auth_data.get('user', {}).get('email') == 'alex@socialsync.io')
+    token = auth_data.get('token')
+    assert_test("Token is signed and present", bool(token) and len(token) > 20)
+
+    # Test authenticated /api/auth/me
+    res = client.get('/api/auth/me', headers={'Authorization': f'Bearer {token}'})
+    assert_test("/api/auth/me returns current user", res.status_code == 200 and res.get_json().get('email') == 'alex@socialsync.io')
+
+    # Test register new user
+    new_email = f"test_{int(time.time())}@socialsync.io"
+    res = client.post('/api/auth/register', json={
+        'name': 'Test Creator',
+        'email': new_email,
+        'password': 'securepassword123'
+    })
+    assert_test("New user registration succeeds (201)", res.status_code == 201)
+    new_user_data = res.get_json()
+    new_token = new_user_data.get('token')
+    assert_test("Registration returns valid token", bool(new_token))
+
+    # Verify password is hashed in database
+    conn = get_db_connection()
+    user_row = conn.execute('SELECT password FROM users WHERE email = ?', (new_email,)).fetchone()
+    conn.close()
+    assert_test("Password is cryptographically hashed (scrypt)", user_row['password'].startswith(('scrypt:', 'pbkdf2:')))
+
+    auth_hdr = {'Authorization': f'Bearer {token}'}
+    new_auth_hdr = {'Authorization': f'Bearer {new_token}'}
+    new_user_id = new_user_data.get('user', {}).get('id')
+
+    # 3. Notification Settings
+    print("\n--- 3. Notification Preferences ---")
+    res = client.get('/api/settings/notifications', headers=auth_hdr)
+    assert_test("Get notifications returns 200", res.status_code == 200)
+    res = client.put('/api/settings/notifications', 
+        headers=auth_hdr,
+        json={'notify_publish': True, 'notify_engage': False, 'notify_email': True}
+    )
+    assert_test("Update notifications returns 200", res.status_code == 200)
+    notif_data = res.get_json()
+    assert_test("Notification preferences persisted", notif_data.get('notify_email') is True and notif_data.get('notify_engage') is False)
+
+    # 4. Social Accounts & Sync
+    print("\n--- 4. Social Accounts Integration ---")
+    res = client.get('/api/accounts', headers=auth_hdr)
+    assert_test("Get accounts returns 200", res.status_code == 200)
+    accounts = res.get_json()
+    assert_test("Contains 6 social platforms", len(accounts) >= 6)
+    assert_test("Accounts include mode metadata", 'mode' in accounts[0] and accounts[0]['mode'] in ['live', 'sandbox'])
+
+    # Toggle connection
+    first_acc_id = accounts[0]['id']
+    orig_connected = accounts[0]['connected']
+    res = client.post(f'/api/accounts/{first_acc_id}/toggle', headers=auth_hdr)
+    assert_test("Toggle account connection returns 200", res.status_code == 200)
+    assert_test("Connection state toggled", res.get_json().get('connected') != orig_connected)
+    # Restore connection
+    client.post(f'/api/accounts/{first_acc_id}/toggle', headers=auth_hdr)
+
+    # Sync all accounts
+    res = client.post('/api/accounts/sync-all', headers=auth_hdr)
+    assert_test("Sync all accounts returns 200", res.status_code == 200)
+    assert_test("Sync returns updated accounts", res.get_json().get('success') is True)
+
+    # 5. Campaigns CRUD
+    print("\n--- 5. Campaigns Module ---")
+    # Create campaign
+    res = client.post('/api/campaigns', headers=auth_hdr, json={
+        'title': 'Automated Test Campaign',
+        'description': 'Integration testing campaign',
+        'budget': '$2,500',
+        'target_reach': 75000,
+        'start_date': '2026-11-01',
+        'end_date': '2026-12-01'
+    })
+    assert_test("Create campaign returns 201", res.status_code == 201)
+    camp = res.get_json()
+    camp_id = camp['id']
+
+    # Update campaign
+    res = client.put(f'/api/campaigns/{camp_id}', headers=auth_hdr, json={
+        'title': 'Automated Test Campaign (Updated)',
+        'budget': '$3,000'
+    })
+    assert_test("Update campaign returns 200", res.status_code == 200)
+    assert_test("Campaign title updated", res.get_json().get('title') == 'Automated Test Campaign (Updated)')
+
+    # 6. Posts CRUD & Scheduling
+    print("\n--- 6. Posts & Scheduling Module ---")
+    # Create draft
+    res = client.post('/api/posts', headers=auth_hdr, json={
+        'content': 'Test draft post for campaign',
+        'platforms': ['Instagram', 'LinkedIn'],
+        'status': 'draft',
+        'campaign_id': camp_id
+    })
+    assert_test("Create draft post returns 201", res.status_code == 201)
+    draft_post = res.get_json()
+    draft_id = draft_post['id']
+
+    # Create published post
+    res = client.post('/api/posts', headers=auth_hdr, json={
+        'content': 'Test published post with live reach',
+        'platforms': ['Instagram', 'TikTok'],
+        'status': 'published',
+        'campaign_id': camp_id
+    })
+    assert_test("Create published post returns 201", res.status_code == 201)
+    pub_post = res.get_json()
+    pub_id = pub_post['id']
+    assert_test("Published post received simulated reach", pub_post.get('reach', 0) > 0)
+
+    # Verify campaign current_reach dynamically summed from linked posts
+    res = client.get('/api/campaigns', headers=auth_hdr)
+    all_camps = res.get_json()
+    test_camp = next((c for c in all_camps if c['id'] == camp_id), None)
+    assert_test("Campaign linked reach is dynamic", test_camp is not None and test_camp.get('current_reach', 0) > 0)
+
+    # Update post
+    res = client.put(f'/api/posts/{draft_id}', headers=auth_hdr, json={
+        'content': 'Updated content for draft post',
+        'status': 'scheduled',
+        'scheduled_for': (datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+    })
+    assert_test("Update post returns 200", res.status_code == 200)
+    assert_test("Post status changed to scheduled", res.get_json().get('status') == 'scheduled')
+
+    # Delete posts
+    res = client.delete(f'/api/posts/{draft_id}', headers=auth_hdr)
+    assert_test("Delete post returns 200", res.status_code == 200)
+    client.delete(f'/api/posts/{pub_id}', headers=auth_hdr)
+
+    # Delete campaign
+    res = client.delete(f'/api/campaigns/{camp_id}', headers=auth_hdr)
+    assert_test("Delete campaign returns 200", res.status_code == 200)
+
+    # 7. File & Image Upload
+    print("\n--- 7. Media Upload Module ---")
+    created_uploads = []
+    sample_png = io.BytesIO(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82')
+    res = client.post('/api/upload', headers=auth_hdr, data={'file': (sample_png, 'sample.png')}, content_type='multipart/form-data')
+    assert_test("File upload returns 201", res.status_code == 201)
+    upload_data = res.get_json()
+    assert_test("Upload returns public URL", bool(upload_data.get('url')) and 'uploads' in upload_data.get('url'))
+    if upload_data.get('filename'):
+        created_uploads.append(upload_data['filename'])
+
+    # 8. Analytics & Time Filters
+    print("\n--- 8. Analytics Module ---")
+    for r in ['7d', '30d', '3m', '1y']:
+        res = client.get(f'/api/analytics?range={r}', headers=auth_hdr)
+        assert_test(f"Analytics range {r} returns 200", res.status_code == 200)
+        anlt = res.get_json()
+        assert_test(f"Analytics {r} returns valid history", len(anlt.get('history', [])) > 0)
+        assert_test(f"Analytics {r} returns platform distribution", len(anlt.get('platforms', [])) >= 6)
+
+    # 9. Global Search
+    print("\n--- 9. Global Search Module ---")
+    res = client.get('/api/search?q=SocialSync', headers=auth_hdr)
+    assert_test("Global search returns 200", res.status_code == 200)
+    search_data = res.get_json()
+    assert_test("Search returns structured categories", 'posts' in search_data and 'accounts' in search_data and 'campaigns' in search_data)
+
+    # 10. Official API Setup, AES-256-GCM Token Storage & Strict Live/Sandbox Separation
+    print("\n--- 10. Official OAuth Config, AES-256-GCM Crypto & Live/Sandbox Isolation ---")
+    from token_crypto import encrypt_token, decrypt_token, redact_secrets
+    from social_integrations import social_manager, _validate_safe_remote_url
+    sample_secret_token = "EAAGm0PX4ZCpsBA_test_oauth_token_123456"
+    aad_a = b"socialsync:oauth:1:facebook"
+    aad_b = b"socialsync:oauth:2:facebook"
+    ciphertext = encrypt_token(sample_secret_token, aad=aad_a)
+    assert_test(
+        "Token encryption uses AES-256-GCM v2 envelope",
+        isinstance(ciphertext, str) and ciphertext.startswith("enc:v2:aes256gcm:") and sample_secret_token not in ciphertext,
+    )
+    assert_test("Token decryption restores exact secret with matching AAD", decrypt_token(ciphertext, aad=aad_a) == sample_secret_token)
+
+    tampered = ciphertext[:-4] + ("AAAA" if ciphertext[-4:] != "AAAA" else "BBBB")
+    tamper_rejected = False
+    try:
+        decrypt_token(tampered, aad=aad_a)
+    except ValueError:
+        tamper_rejected = True
+    assert_test("Tampered ciphertext fails AES-GCM authentication tag", tamper_rejected)
+
+    aad_rejected = False
+    try:
+        decrypt_token(ciphertext, aad=aad_b)
+    except ValueError:
+        aad_rejected = True
+    assert_test("Cross-tenant AAD mismatch fails AES-GCM verification", aad_rejected)
+
+    redacted_msg = redact_secrets(f"Failure with Bearer {sample_secret_token} & client_secret=my_top_secret")
+    assert_test(
+        "redact_secrets scrubs tokens and secret parameters",
+        sample_secret_token not in redacted_msg and "my_top_secret" not in redacted_msg,
+    )
+
+    res = client.get('/api/oauth/config-status', headers=auth_hdr)
+    assert_test("OAuth config-status returns 200", res.status_code == 200)
+    cfg = res.get_json()
+    providers = cfg.get('providers', {})
+    assert_test("Config status covers Facebook, Instagram, YouTube", all(p in providers for p in ('Facebook', 'Instagram', 'YouTube')))
+
+    def _collect_keys(obj):
+        keys = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                keys.append(str(k).lower())
+                keys.extend(_collect_keys(v))
+        elif isinstance(obj, list):
+            for item in obj:
+                keys.extend(_collect_keys(item))
+        return keys
+
+    cfg_keys = _collect_keys(cfg)
+    forbidden_keys = {'app_secret', 'client_secret', 'access_token', 'refresh_token', 'encrypted_access_token', 'encrypted_refresh_token', 'secret_key', 'token_encryption_key'}
+    assert_test("Config status exposes no secrets or raw tokens", not any(k in forbidden_keys for k in cfg_keys))
+
+    # Video upload support
+    sample_mp4 = io.BytesIO(b'\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom')
+    res = client.post('/api/upload', headers=auth_hdr, data={'file': (sample_mp4, 'clip.mp4')}, content_type='multipart/form-data')
+    assert_test("Video file upload returns 201", res.status_code == 201)
+    vid_data = res.get_json()
+    assert_test("Video upload detects media_type == 'video'", vid_data.get('media_type') == 'video')
+    if vid_data.get('filename'):
+        created_uploads.append(vid_data['filename'])
+
+    # Live Mode strict failure guarantees (never simulates failed/unsupported live calls)
+    for test_label, live_payload in [
+        ("Live Mode rejects Sandbox-only platform (X)", {'content': 'Live X test', 'platforms': ['X'], 'publish_mode': 'live', 'status': 'published'}),
+        ("Live Mode rejects Instagram text-only post", {'content': 'Live IG text test', 'platforms': ['Instagram'], 'publish_mode': 'live', 'status': 'published'}),
+        ("Live Mode rejects YouTube non-video post", {'content': 'Live YT text test', 'platforms': ['YouTube'], 'publish_mode': 'live', 'status': 'published'}),
+    ]:
+        res = client.post('/api/posts', headers=auth_hdr, json=live_payload)
+        assert_test(f"{test_label} (422)", res.status_code == 422)
+        err_post = res.get_json()
+        assert_test(f"{test_label} saved as 'failed'", err_post.get('status') == 'failed' and err_post.get('publish_mode') == 'live')
+        if err_post.get('id'):
+            client.delete(f"/api/posts/{err_post['id']}", headers=auth_hdr)
+
+    # Analytics includes separate live_analytics object
+    anlt_res = client.get('/api/analytics?range=30d', headers=auth_hdr).get_json()
+    assert_test("Analytics includes live_analytics separation block", isinstance(anlt_res.get('live_analytics'), dict) and 'snapshots' in anlt_res['live_analytics'])
+
+    # 11. Security Audit: Strict Auth, IDOR Isolation, OAuth Anti-Replay, XSS & SSRF Guards
+    print("\n--- 11. Security Audit & Authorization Hardening ---")
+    protected_calls = [
+        ('GET', '/api/auth/me'),
+        ('PUT', '/api/auth/profile'),
+        ('POST', '/api/auth/logout'),
+        ('GET', '/api/settings/notifications'),
+        ('PUT', '/api/settings/notifications'),
+        ('GET', '/api/oauth/config-status'),
+        ('GET', '/api/oauth/facebook/start'),
+        ('GET', '/api/oauth/meta/pages'),
+        ('POST', '/api/oauth/meta/select-page'),
+        ('POST', '/api/oauth/facebook/disconnect'),
+        ('GET', '/api/accounts'),
+        ('POST', f'/api/accounts/{first_acc_id}/toggle'),
+        ('POST', f'/api/accounts/{first_acc_id}/sync'),
+        ('POST', '/api/accounts/sync-all'),
+        ('GET', '/api/posts'),
+        ('POST', '/api/posts'),
+        ('PUT', '/api/posts/1'),
+        ('DELETE', '/api/posts/1'),
+        ('GET', '/api/campaigns'),
+        ('POST', '/api/campaigns'),
+        ('PUT', '/api/campaigns/1'),
+        ('DELETE', '/api/campaigns/1'),
+        ('GET', '/api/analytics'),
+        ('GET', '/api/activity'),
+        ('GET', '/api/search?q=a'),
+    ]
+    unauth_all_401 = all(client.open(path, method=method).status_code == 401 for method, path in protected_calls)
+    assert_test("All 25 protected JSON endpoints reject unauthenticated requests with 401", unauth_all_401)
+    assert_test("Unauthenticated /api/upload rejected with 401", client.post('/api/upload').status_code == 401)
+
+    for label, bad_tok in [
+        ("Rejects legacy local_offline_token", "Bearer local_offline_token"),
+        ("Rejects forged JWT-like token", "Bearer forged.invalid.signature"),
+    ]:
+        bad_res = client.get('/api/accounts', headers={'Authorization': bad_tok})
+        assert_test(f"{label} with 401", bad_res.status_code == 401)
+
+    # Horizontal privilege escalation / IDOR isolation (User A vs User B)
+    camp_a = client.post('/api/campaigns', headers=auth_hdr, json={'title': 'Private Tenant A Campaign'}).get_json()
+    post_a = client.post('/api/posts', headers=auth_hdr, json={
+        'content': 'Tenant A secret launch post',
+        'platforms': ['Instagram'],
+        'status': 'draft',
+        'campaign_id': camp_a['id'],
+    }).get_json()
+
+    assert_test("User B sees isolated 0 posts from User A", len(client.get('/api/posts', headers=new_auth_hdr).get_json()) == 0)
+    assert_test("User B sees isolated 0 campaigns from User A", len(client.get('/api/campaigns', headers=new_auth_hdr).get_json()) == 0)
+    assert_test("User B search cannot see User A private content", len(client.get('/api/search?q=Tenant%20A%20secret', headers=new_auth_hdr).get_json().get('posts', [])) == 0)
+    assert_test("User B cannot update User A post (404)", client.put(f"/api/posts/{post_a['id']}", headers=new_auth_hdr, json={'content': 'hijacked'}).status_code == 404)
+    assert_test("User B cannot delete User A post (404)", client.delete(f"/api/posts/{post_a['id']}", headers=new_auth_hdr).status_code == 404)
+    assert_test("User B cannot update User A campaign (404)", client.put(f"/api/campaigns/{camp_a['id']}", headers=new_auth_hdr, json={'title': 'hijacked'}).status_code == 404)
+    assert_test("User B cannot delete User A campaign (404)", client.delete(f"/api/campaigns/{camp_a['id']}", headers=new_auth_hdr).status_code == 404)
+    assert_test("User B cannot toggle User A account (404)", client.post(f"/api/accounts/{first_acc_id}/toggle", headers=new_auth_hdr).status_code == 404)
+    assert_test("User B cannot sync User A account (404)", client.post(f"/api/accounts/{first_acc_id}/sync", headers=new_auth_hdr).status_code == 404)
+    assert_test("User B cannot link post to User A campaign (404)", client.post('/api/posts', headers=new_auth_hdr, json={
+        'content': 'Cross tenant link attempt',
+        'platforms': ['Instagram'],
+        'campaign_id': camp_a['id'],
+    }).status_code == 404)
+
+    client.delete(f"/api/posts/{post_a['id']}", headers=auth_hdr)
+    client.delete(f"/api/campaigns/{camp_a['id']}", headers=auth_hdr)
+
+    # SVG Stored XSS upload rejection + nosniff header check
+    svg_payload = io.BytesIO(b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')
+    svg_res = client.post('/api/upload', headers=auth_hdr, data={'file': (svg_payload, 'xss.svg')}, content_type='multipart/form-data')
+    assert_test("SVG upload rejected to prevent stored XSS (400)", svg_res.status_code == 400)
+    if created_uploads:
+        up_get = client.get(f"/uploads/{created_uploads[0]}")
+        assert_test("Served upload includes X-Content-Type-Options: nosniff", up_get.headers.get('X-Content-Type-Options') == 'nosniff')
+        up_get.close()
+
+    # SSRF URL validation checks
+    ssrf_blocks_local, _ = _validate_safe_remote_url("http://127.0.0.1:5000/secret")
+    ssrf_blocks_meta, _ = _validate_safe_remote_url("http://169.254.169.254/latest/meta-data/")
+    ssrf_blocks_file, _ = _validate_safe_remote_url("file:///C:/Windows/win.ini")
+    assert_test("SSRF guard rejects loopback, metadata IP, and file:// URLs", not ssrf_blocks_local and not ssrf_blocks_meta and not ssrf_blocks_file)
+
+    # OAuth CSRF single-use state nonce replay check (offline monkeypatched — ZERO external calls)
+    old_meta_id = os.environ.get('META_APP_ID')
+    old_meta_sec = os.environ.get('META_APP_SECRET')
+    orig_exchange_meta = social_manager.exchange_meta_code
+    orig_revoke = social_manager.revoke_oauth_connection
+    exchange_calls = 0
+
+    def _mock_exchange_meta(prov, code):
+        nonlocal exchange_calls
+        exchange_calls += 1
+        return False, {"error": "Mocked test exchange abort (no external call)."}
+
+    try:
+        os.environ['META_APP_ID'] = 'test_meta_app_id_audit'
+        os.environ['META_APP_SECRET'] = 'test_meta_secret_audit'
+        social_manager.exchange_meta_code = _mock_exchange_meta
+
+        start_res = client.get('/api/oauth/facebook/start', headers=new_auth_hdr)
+        assert_test("OAuth start generates authorization URL when configured", start_res.status_code == 200)
+        auth_url = start_res.get_json().get('auth_url', '')
+        from urllib.parse import urlparse, parse_qs
+        state_val = (parse_qs(urlparse(auth_url).query).get('state') or [''])[0]
+        assert_test("OAuth start returns non-empty signed state", bool(state_val))
+
+        cb1 = client.get(f"/api/oauth/facebook/callback?code=dummy&state={state_val}")
+        assert_test("First OAuth callback consumes state nonce cleanly", exchange_calls == 1 and cb1.status_code == 400)
+
+        cb2 = client.get(f"/api/oauth/facebook/callback?code=dummy&state={state_val}")
+        cb2_html = cb2.get_data(as_text=True)
+        assert_test("Replayed OAuth state is blocked before provider exchange", exchange_calls == 1 and cb2.status_code == 400 and "replay/CSRF" in cb2_html)
+        assert_test("OAuth callback HTML locks postMessage to frontend origin (not '*')", '"*"' not in cb2_html)
+
+        # Disconnect token wipe verification (offline monkeypatched revocation)
+        social_manager.revoke_oauth_connection = lambda **kwargs: (True, "Mocked revocation")
+        from app import _oauth_aad
+        conn = get_db_connection()
+        conn.execute(
+            '''
+            INSERT INTO oauth_connections (user_id, platform, provider, external_account_id, account_name, encrypted_access_token, encrypted_refresh_token, connected)
+            VALUES (?, 'YouTube', 'google', 'ch_test', 'Test Ch', ?, ?, 1)
+            ''',
+            (
+                new_user_id,
+                encrypt_token('test_access_secret', aad=_oauth_aad(new_user_id, 'YouTube')),
+                encrypt_token('test_refresh_secret', aad=_oauth_aad(new_user_id, 'YouTube')),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        disc_res = client.post('/api/oauth/youtube/disconnect', headers=new_auth_hdr)
+        conn = get_db_connection()
+        wiped = conn.execute(
+            "SELECT connected, encrypted_access_token, encrypted_refresh_token FROM oauth_connections WHERE user_id = ? AND platform = 'YouTube'",
+            (new_user_id,),
+        ).fetchone()
+        conn.close()
+        assert_test(
+            "Disconnect wipes encrypted tokens and marks connection inactive",
+            disc_res.status_code == 200 and wiped['connected'] == 0 and wiped['encrypted_access_token'] == '' and wiped['encrypted_refresh_token'] is None,
+        )
+
+        # --- 12. Security Audit 2 Remediation Verification ---
+        print("\n--- 12. Security Hardening Verification (15 Fixes) ---")
+        import re
+        import tempfile
+        import urllib.error
+        import social_integrations
+        from token_crypto import harden_file_permissions
+
+        # 12A. Upload magic-byte verification, 128-bit randomness & /uploads/ CSP/CORS headers
+        fake_png = io.BytesIO(b'#!/bin/sh\necho malicious payload disguised as png\n')
+        spoof_res = client.post(
+            '/api/upload',
+            headers=new_auth_hdr,
+            data={'file': (fake_png, 'spoofed.png')},
+            content_type='multipart/form-data',
+        )
+        assert_test("Magic-byte guard rejects spoofed .png payload (400)", spoof_res.status_code == 400)
+
+        sample_up_name = created_uploads[0] if created_uploads else ""
+        assert_test(
+            "Uploaded filename uses 128-bit hex token",
+            bool(re.match(r'^media_[0-9a-f]{32}_sample\.png$', sample_up_name)),
+            sample_up_name,
+        )
+        if sample_up_name:
+            up_hdr_res = client.get(f"/uploads/{sample_up_name}", headers={'Origin': 'http://evil.example.com'})
+            csp_val = up_hdr_res.headers.get('Content-Security-Policy', '')
+            aco_val = up_hdr_res.headers.get('Access-Control-Allow-Origin', '')
+            assert_test(
+                "Uploads enforce default-src 'none' sandbox CSP and restrict CORS",
+                "default-src 'none'" in csp_val and 'sandbox' in csp_val and aco_val != '*',
+                f"CSP={csp_val!r}, ACAO={aco_val!r}",
+            )
+            up_hdr_res.close()
+
+        # 12B. URL scheme validation on profile & post writes
+        bad_prof = client.put('/api/auth/profile', headers=new_auth_hdr, json={'avatar': 'javascript:alert(1)'})
+        assert_test("Profile rejects javascript: avatar URL (400)", bad_prof.status_code == 400)
+
+        bad_post = client.post(
+            '/api/posts',
+            headers=new_auth_hdr,
+            json={'content': 'XSS URL test', 'platforms': ['Instagram'], 'media_url': 'javascript:alert(1)'},
+        )
+        assert_test("Post creation rejects javascript: media_url (400)", bad_post.status_code == 400)
+
+        good_draft = client.post(
+            '/api/posts',
+            headers=new_auth_hdr,
+            json={'content': 'URL check post', 'platforms': ['Instagram'], 'status': 'draft'},
+        ).get_json()
+        bad_put_post = client.put(
+            f"/api/posts/{good_draft['id']}",
+            headers=new_auth_hdr,
+            json={'media_url': 'data:text/html,<script>alert(1)</script>'},
+        )
+        assert_test("Post update rejects data: media_url (400)", bad_put_post.status_code == 400)
+        client.delete(f"/api/posts/{good_draft['id']}", headers=new_auth_hdr)
+
+        # 12C. SSRF redirect + DNS rebinding pinned IP + Google upload session URI guard
+        sess_http, _, _ = social_integrations._validate_google_upload_session_url("http://upload.googleapis.com/upload/v1")
+        sess_evil, _, _ = social_integrations._validate_google_upload_session_url("https://evil.example.com/upload/v1")
+        sess_cred, _, _ = social_integrations._validate_google_upload_session_url("https://user:pass@upload.googleapis.com/upload/v1")
+        sess_ip, _, _ = social_integrations._validate_google_upload_session_url("https://127.0.0.1/upload/v1")
+        assert_test(
+            "YouTube resumable session guard rejects HTTP, untrusted host, creds, and loopback",
+            not sess_http and not sess_evil and not sess_cred and not sess_ip,
+        )
+
+        orig_getaddrinfo = social_integrations.socket.getaddrinfo
+        pinned_ips_seen = []
+
+        class _FakeHeaders:
+            def __init__(self, headers_dict):
+                self._h = headers_dict
+            def get(self, key, default=None):
+                return self._h.get(key, default)
+
+        class _FakeResp:
+            def __init__(self, status, headers_dict, body=b''):
+                self.status = status
+                self._headers = headers_dict
+                self._body = body
+                self._read_done = False
+            def getheader(self, name, default=None):
+                return self._headers.get(name, default)
+            def read(self, n=-1):
+                if self._read_done:
+                    return b''
+                self._read_done = True
+                return self._body
+
+        class _FakeConn:
+            def __init__(self, meta):
+                pinned_ips_seen.append(meta['pinned_ip'])
+            def request(self, *args, **kwargs):
+                pass
+            def getresponse(self):
+                return _FakeResp(302, {'Location': 'http://127.0.0.1:5000/internal'})
+            def close(self):
+                pass
+
+        try:
+            social_integrations.socket.getaddrinfo = lambda host, port, *a, **kw: [
+                (2, 1, 6, '', ('93.184.216.34' if 'cdn.example.com' in str(host) else '127.0.0.1', port or 443))
+            ]
+            dl_ok, _, dl_err = social_integrations._download_remote_media_safely(
+                "https://cdn.example.com/video.mp4",
+                connection_factory=_FakeConn,
+            )
+            assert_test(
+                "SSRF downloader pins validated public IP and blocks redirect to loopback",
+                not dl_ok and pinned_ips_seen == ['93.184.216.34'] and ('private or internal' in (dl_err or '').lower() or 'disallowed' in (dl_err or '').lower() or 'loopback' in (dl_err or '').lower()),
+                f"dl_ok={dl_ok}, pinned={pinned_ips_seen}, err={dl_err}",
+            )
+        finally:
+            social_integrations.socket.getaddrinfo = orig_getaddrinfo
+
+        # 12D. Meta POST token exchange & sibling-safe granular permission disconnect
+        social_manager.exchange_meta_code = orig_exchange_meta
+        orig_http_json = social_integrations._http_json
+        recorded_meta_calls = []
+
+        def _mock_http_json(method, url, headers=None, params=None, form_data=None, json_body=None, timeout=30):
+            recorded_meta_calls.append((method, url, params, form_data))
+            if 'oauth/access_token' in url:
+                return True, 200, {'access_token': 'mock_fb_tok', 'expires_in': 3600}, None
+            if 'me/accounts' in url:
+                return True, 200, {'data': []}, None
+            return False, 400, {}, 'unexpected call'
+
+        try:
+            social_integrations._http_json = _mock_http_json
+            social_manager.exchange_meta_code('facebook', 'secret_auth_code_123')
+            oauth_calls = [c for c in recorded_meta_calls if 'oauth/access_token' in c[1]]
+            meta_post_only = (
+                len(oauth_calls) == 2
+                and all(c[0] == 'POST' and c[2] is None and isinstance(c[3], dict) for c in oauth_calls)
+                and oauth_calls[0][3].get('client_secret') == 'test_meta_secret_audit'
+                and oauth_calls[0][3].get('code') == 'secret_auth_code_123'
+            )
+            assert_test("Meta OAuth token & long-lived upgrade use POST body (never GET params)", meta_post_only)
+        finally:
+            social_integrations._http_json = orig_http_json
+
+        revoke_calls = []
+        def _capture_revoke(**kwargs):
+            revoke_calls.append(kwargs)
+            return True, "Mocked revocation"
+
+        social_manager.revoke_oauth_connection = _capture_revoke
+        conn = get_db_connection()
+        for plat, ext_id in [('Facebook', 'fb_page_1'), ('Instagram', 'ig_biz_1')]:
+            aad = _oauth_aad(new_user_id, plat)
+            conn.execute(
+                '''
+                INSERT INTO oauth_connections (
+                    user_id, platform, provider, external_account_id, account_name,
+                    encrypted_access_token, encrypted_user_token, connected
+                )
+                VALUES (?, ?, 'meta', ?, ?, ?, ?, 1)
+                ''',
+                (
+                    new_user_id,
+                    plat,
+                    ext_id,
+                    f'{plat} Test',
+                    encrypt_token(f'{plat}_page_tok', aad=aad),
+                    encrypt_token('test_meta_user_tok', aad=aad),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        client.post('/api/oauth/facebook/disconnect', headers=new_auth_hdr)
+        conn = get_db_connection()
+        ig_still = conn.execute(
+            "SELECT connected FROM oauth_connections WHERE user_id = ? AND platform = 'Instagram' AND provider = 'meta'",
+            (new_user_id,),
+        ).fetchone()
+        conn.close()
+        assert_test(
+            "Disconnecting Facebook revokes only pages_manage_posts while sibling Instagram stays active",
+            len(revoke_calls) == 1
+            and revoke_calls[0].get('permission_name') == 'pages_manage_posts'
+            and revoke_calls[0].get('user_access_token') == 'test_meta_user_tok'
+            and ig_still and ig_still['connected'] == 1,
+        )
+
+        client.post('/api/oauth/instagram/disconnect', headers=new_auth_hdr)
+        assert_test(
+            "Disconnecting final Meta platform performs full permission revocation",
+            len(revoke_calls) == 2 and revoke_calls[1].get('permission_name') is None,
+        )
+
+        # 12E. YouTube reactive 401 refresh + untrusted Location rejection
+        tmp_vid = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+        tmp_vid.write(b'\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom')
+        tmp_vid.close()
+
+        orig_urlopen = social_integrations.urllib.request.urlopen
+        orig_pinned_https = social_integrations._PinnedHTTPSConnection
+        orig_refresh_google = social_manager.refresh_google_access_token
+        orig_resolve_safe = social_integrations._resolve_and_validate_safe_url
+        put_attempts = []
+        refreshed_tokens_saved = []
+
+        class _MockInitResp:
+            def __init__(self, location):
+                self.headers = {'Location': location}
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        class _MockPinnedPutConn:
+            def __init__(self, hostname, port, pinned_ip, timeout=300):
+                self.hostname = hostname
+            def putrequest(self, method, path_query):
+                put_attempts.append((self.hostname, method, path_query))
+            def putheader(self, k, v):
+                pass
+            def endheaders(self):
+                pass
+            def send(self, chunk):
+                pass
+            def getresponse(self):
+                return _FakeResp(200, {}, b'{"id": "yt_video_123"}')
+            def close(self):
+                pass
+
+        try:
+            init_count = {'n': 0}
+            def _mock_urlopen_401(req, timeout=30):
+                init_count['n'] += 1
+                if init_count['n'] == 1:
+                    raise urllib.error.HTTPError(req.full_url, 401, 'Unauthorized', {}, io.BytesIO(b'{"error":{"message":"Invalid Credentials"}}'))
+                return _MockInitResp('https://upload.googleapis.com/upload/youtube/v3/videos?upload_id=ok')
+
+            social_integrations.urllib.request.urlopen = _mock_urlopen_401
+            social_integrations._PinnedHTTPSConnection = _MockPinnedPutConn
+            social_integrations._resolve_and_validate_safe_url = lambda u: (
+                True,
+                "",
+                {'scheme': 'https', 'hostname': 'upload.googleapis.com', 'netloc': 'upload.googleapis.com', 'port': 443, 'path_query': '/upload/youtube/v3/videos?upload_id=ok', 'pinned_ip': '142.250.1.1'},
+            )
+            social_manager.refresh_google_access_token = lambda rt: (True, {'access_token': 'new_yt_tok', 'expires_at': '2099-01-01 00:00:00'})
+
+            yt_ok_res = social_manager.publish_live_youtube(
+                access_token='expired_yt_tok',
+                refresh_token='yt_refresh_tok',
+                expires_at='2099-01-01 00:00:00',
+                content='Video desc',
+                media_type='video',
+                local_file_path=tmp_vid.name,
+                token_refresh_cb=lambda tok, exp, rt: refreshed_tokens_saved.append(tok),
+            )
+            assert_test(
+                "YouTube reactive 401 refreshes token, invokes persist callback, and completes upload",
+                yt_ok_res.get('success') is True and yt_ok_res.get('external_post_id') == 'yt_video_123' and refreshed_tokens_saved == ['new_yt_tok'],
+            )
+
+            put_attempts.clear()
+            social_integrations.urllib.request.urlopen = lambda req, timeout=30: _MockInitResp('https://evil.example.com/steal-token')
+            yt_bad_loc = social_manager.publish_live_youtube(
+                access_token='valid_yt_tok',
+                refresh_token='yt_refresh_tok',
+                expires_at='2099-01-01 00:00:00',
+                content='Video desc',
+                media_type='video',
+                local_file_path=tmp_vid.name,
+            )
+            assert_test(
+                "YouTube rejects untrusted upload Location URI before PUTting bearer token",
+                yt_bad_loc.get('success') is False and len(put_attempts) == 0,
+            )
+        finally:
+            social_integrations.urllib.request.urlopen = orig_urlopen
+            social_integrations._PinnedHTTPSConnection = orig_pinned_https
+            social_integrations._resolve_and_validate_safe_url = orig_resolve_safe
+            social_manager.refresh_google_access_token = orig_refresh_google
+            if os.path.exists(tmp_vid.name):
+                os.remove(tmp_vid.name)
+
+        # 12F. Popup origin matching & OAuth redirect URL query hygiene
+        origin_start = client.get('/api/oauth/facebook/start?origin=http://127.0.0.1:5173', headers=new_auth_hdr)
+        origin_auth_url = origin_start.get_json().get('auth_url', '')
+        origin_state = (parse_qs(urlparse(origin_auth_url).query).get('state') or [''])[0]
+        cb_origin = client.get(f"/api/oauth/facebook/callback?error=access_denied&error_description=User+cancelled&state={origin_state}")
+        cb_origin_html = cb_origin.get_data(as_text=True)
+        assert_test(
+            "Popup callback targets exact allowed opener origin and omits error details from redirect query string",
+            '"http://127.0.0.1:5173"' in cb_origin_html
+            and 'http://127.0.0.1:5173/?oauth_status=error"' in cb_origin_html
+            and 'oauth_message=' not in cb_origin_html,
+        )
+
+        # 12G. Standalone token_crypto string AAD & temp-file permission hardening
+        str_ct = encrypt_token("standalone_secret_val", aad="user:99:str-aad")
+        assert_test("token_crypto accepts string AAD cleanly", decrypt_token(str_ct, aad="user:99:str-aad") == "standalone_secret_val")
+
+        acl_tmp = tempfile.NamedTemporaryFile(prefix='ss_acl_test_', delete=False)
+        acl_tmp.write(b'ephemeral acl test')
+        acl_tmp.close()
+        try:
+            acl_ok = harden_file_permissions(acl_tmp.name)
+            assert_test("harden_file_permissions succeeds on newly created secret file", acl_ok is True)
+        finally:
+            if os.path.exists(acl_tmp.name):
+                os.remove(acl_tmp.name)
+
+        # 12I. Automated Scheduled Publishing Worker (Sandbox + Live Failure Separation)
+        from app import process_due_scheduled_posts
+        past_due = (datetime.now() - timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M:%S')
+        sched_sbx_res = client.post(
+            '/api/posts',
+            headers=new_auth_hdr,
+            json={
+                'content': 'Scheduled Sandbox smoke post',
+                'platforms': ['Facebook'],
+                'status': 'scheduled',
+                'scheduled_for': past_due,
+                'publish_mode': 'sandbox',
+            },
+        )
+        sched_live_res = client.post(
+            '/api/posts',
+            headers=new_auth_hdr,
+            json={
+                'content': 'Scheduled Live unconfigured post',
+                'platforms': ['Facebook'],
+                'status': 'scheduled',
+                'scheduled_for': past_due,
+                'publish_mode': 'live',
+            },
+        )
+        sched_sbx_id = sched_sbx_res.get_json().get('id')
+        sched_live_id = sched_live_res.get_json().get('id')
+
+        processed_cnt = process_due_scheduled_posts()
+        conn = get_db_connection()
+        sbx_row = conn.execute('SELECT status, publish_mode FROM posts WHERE id = ?', (sched_sbx_id,)).fetchone()
+        live_row = conn.execute('SELECT status, publish_mode, error_message FROM posts WHERE id = ?', (sched_live_id,)).fetchone()
+        conn.close()
+        assert_test(
+            "Scheduler processes due Sandbox post as published and due disconnected Live post as failed",
+            processed_cnt >= 2
+            and sbx_row and sbx_row['status'] == 'published' and sbx_row['publish_mode'] == 'sandbox'
+            and live_row and live_row['status'] == 'failed' and bool(live_row['error_message']),
+            f"processed={processed_cnt}, sbx={dict(sbx_row) if sbx_row else None}, live={dict(live_row) if live_row else None}",
+        )
+
+        # 12H. Server-side token revocation (POST /api/auth/logout) & rate limiting (429)
+        logout_res = client.post('/api/auth/logout', headers=new_auth_hdr)
+        revoked_me = client.get('/api/auth/me', headers=new_auth_hdr)
+        assert_test(
+            "POST /api/auth/logout increments token_version and invalidates prior bearer token",
+            logout_res.status_code == 200 and revoked_me.status_code == 401,
+        )
+
+        rl_login_codes = []
+        rl_login_retry = None
+        for idx in range(9):
+            rl_r = client.post(
+                '/api/auth/login',
+                json={'email': 'ratelimit_probe@example.com', 'password': f'wrong_{idx}'},
+                environ_base={'REMOTE_ADDR': '203.0.113.50'},
+            )
+            rl_login_codes.append(rl_r.status_code)
+            if rl_r.status_code == 429:
+                rl_login_retry = rl_r.headers.get('Retry-After')
+
+        rl_reg_codes = []
+        rl_reg_retry = None
+        for idx in range(11):
+            rl_rg = client.post(
+                '/api/auth/register',
+                json={'name': 'RL', 'email': 'bad-email', 'password': '123'},
+                environ_base={'REMOTE_ADDR': '203.0.113.51'},
+            )
+            rl_reg_codes.append(rl_rg.status_code)
+            if rl_rg.status_code == 429:
+                rl_reg_retry = rl_rg.headers.get('Retry-After')
+
+        assert_test(
+            "Login rate limiter triggers 429 + Retry-After after repeated failed attempts",
+            rl_login_codes[:8].count(401) == 8 and rl_login_codes[8] == 429 and bool(rl_login_retry),
+            f"codes={rl_login_codes}",
+        )
+        assert_test(
+            "Register rate limiter triggers 429 + Retry-After after burst threshold",
+            rl_reg_codes[10] == 429 and bool(rl_reg_retry),
+            f"codes={rl_reg_codes}",
+        )
+    finally:
+        social_manager.exchange_meta_code = orig_exchange_meta
+        social_manager.revoke_oauth_connection = orig_revoke
+        if old_meta_id is None:
+            os.environ.pop('META_APP_ID', None)
+        else:
+            os.environ['META_APP_ID'] = old_meta_id
+        if old_meta_sec is None:
+            os.environ.pop('META_APP_SECRET', None)
+        else:
+            os.environ['META_APP_SECRET'] = old_meta_sec
+
+        # Clean up test uploaded files & temporary test user rows so DB stays pristine
+        upload_dir = app.config['UPLOAD_FOLDER']
+        for fname in created_uploads:
+            fpath = os.path.join(upload_dir, fname)
+            if os.path.isfile(fpath):
+                try:
+                    os.remove(fpath)
+                except OSError:
+                    pass
+        if new_user_id:
+            conn = get_db_connection()
+            conn.execute('DELETE FROM oauth_connections WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM oauth_states WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM social_accounts WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM activity WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM posts WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM campaigns WHERE user_id = ?', (new_user_id,))
+            conn.execute('DELETE FROM users WHERE id = ?', (new_user_id,))
+            conn.commit()
+            conn.close()
+
+    print("\n==================================================")
+    print(f"TEST RESULTS: {passed} PASSED, {failed} FAILED")
+    print("==================================================")
+    return failed == 0
+
+if __name__ == '__main__':
+    success = run_tests()
+    sys.exit(0 if success else 1)
+

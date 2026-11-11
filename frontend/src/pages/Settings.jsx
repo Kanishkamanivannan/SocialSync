@@ -1,21 +1,21 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  User, 
-  Moon, 
-  Sun, 
-  Bell, 
-  ShieldCheck, 
-  Database, 
-  Check, 
+import {
+  User,
+  Moon,
+  Sun,
+  Bell,
+  Database,
+  Check,
   AlertCircle,
   AtSign,
   Mail,
   Briefcase,
   Image as ImageIcon,
   Save,
-  RefreshCw
+  RefreshCw,
+  Clock
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, API_BASE, isSafeHttpUrl } from '../services/api';
 
 const AVATAR_PRESETS = [
   { label: 'Default', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80' },
@@ -51,22 +51,56 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
   const [notifyPublish, setNotifyPublish] = useState(true);
   const [notifyEngage, setNotifyEngage] = useState(true);
   const [notifyEmail, setNotifyEmail] = useState(false);
+  const [notifSaving, setNotifSaving] = useState(false);
 
   // Diagnostics state
+  const [backendHealth, setBackendHealth] = useState(null);
   const [backendStatus, setBackendStatus] = useState('checking'); // 'connected' | 'error' | 'checking'
 
+  // Load notification preferences from database
   useEffect(() => {
-    fetch('http://127.0.0.1:5000/api/health')
-      .then(res => res.json())
+    api.getNotificationSettings().then(prefs => {
+      if (prefs) {
+        setNotifyPublish(Boolean(prefs.notify_publish));
+        setNotifyEngage(Boolean(prefs.notify_engage));
+        setNotifyEmail(Boolean(prefs.notify_email));
+      }
+    });
+
+    api.getHealth()
       .then(data => {
-        if (data.status === 'healthy') {
+        if (data?.status === 'healthy') {
           setBackendStatus('connected');
+          setBackendHealth(data);
         } else {
           setBackendStatus('error');
         }
       })
       .catch(() => setBackendStatus('error'));
   }, []);
+
+  const handleNotificationToggle = async (key, value) => {
+    const updated = {
+      notify_publish: key === 'publish' ? value : notifyPublish,
+      notify_engage: key === 'engage' ? value : notifyEngage,
+      notify_email: key === 'email' ? value : notifyEmail
+    };
+
+    if (key === 'publish') setNotifyPublish(value);
+    if (key === 'engage') setNotifyEngage(value);
+    if (key === 'email') setNotifyEmail(value);
+
+    setNotifSaving(true);
+    try {
+      await api.updateNotificationSettings(updated);
+      setSuccessMessage('Notification preferences saved to your database profile.');
+      setTimeout(() => setSuccessMessage(''), 3000);
+    } catch (err) {
+      console.error('Failed to update notification settings:', err);
+    } finally {
+      setNotifSaving(false);
+    }
+  };
 
   const validateInputs = () => {
     if (!name || name.trim().length < 2) {
@@ -90,6 +124,12 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
       return;
     }
 
+    const trimmedAvatar = avatar.trim();
+    if (trimmedAvatar && !isSafeHttpUrl(trimmedAvatar)) {
+      setErrorMessage('Avatar URL must use a valid http:// or https:// web address.');
+      return;
+    }
+
     setIsSaving(true);
     try {
       const cleanUsername = username ? username.trim().replace(/^@/, '') : name.trim().toLowerCase().replace(/\s+/g, '_');
@@ -98,7 +138,7 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
         username: cleanUsername,
         email: email.trim(),
         role: role.trim() || 'Member',
-        avatar: avatar.trim() || AVATAR_PRESETS[0].url
+        avatar: trimmedAvatar || AVATAR_PRESETS[0].url
       };
 
       const result = await api.updateProfile(profilePayload);
@@ -113,16 +153,15 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
       setTimeout(() => setSuccessMessage(''), 3500);
     } catch (err) {
       console.error('Error saving profile:', err);
-      setErrorMessage('Failed to save profile changes. Please try again.');
+      setErrorMessage(err?.message || 'Failed to save profile changes. Please try again.');
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleResetData = () => {
-    if (window.confirm('Reset all demo posts and accounts back to factory defaults?')) {
-      localStorage.removeItem('socialsync_initialized');
-      localStorage.removeItem('socialsync_user');
+  const handleResetData = async () => {
+    if (window.confirm('Clear cached browser session data and sign out cleanly?')) {
+      await api.logout();
       window.location.reload();
     }
   };
@@ -192,9 +231,9 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
             backgroundColor: 'var(--bg-muted)',
             borderRadius: 'var(--radius-lg)'
           }}>
-            <img 
-              src={avatar || AVATAR_PRESETS[0].url} 
-              alt="Avatar Preview" 
+            <img
+              src={isSafeHttpUrl(avatar) ? avatar : AVATAR_PRESETS[0].url}
+              alt="Avatar Preview"
               onError={(e) => { e.target.src = AVATAR_PRESETS[0].url; }}
               style={{
                 width: '72px',
@@ -250,7 +289,7 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Taylor Swift"
+                placeholder="e.g. Alex Morgan"
                 className="form-input"
                 required
               />
@@ -266,7 +305,7 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value.replace(/^@/, ''))}
-                placeholder="e.g. taylorswift"
+                placeholder="e.g. alexmorgan"
                 className="form-input"
               />
               <span className="form-helper">Unique handle used for mention tags and system identity.</span>
@@ -281,7 +320,7 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="e.g. taylor@socialsync.io"
+                placeholder="e.g. you@example.com"
                 className="form-input"
                 required
               />
@@ -408,12 +447,15 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
         </div>
       </div>
 
-      {/* SECTION 3: Notifications */}
+      {/* SECTION 3: Persistent Notifications Preferences */}
       <div className="clean-card" style={{ padding: '1.75rem' }}>
-        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-primary)' }}>
-          <Bell size={20} color="var(--primary)" />
-          <span>3. Notifications & Activity Alerts</span>
-        </h3>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-primary)' }}>
+            <Bell size={20} color="var(--primary)" />
+            <span>3. Notifications & Activity Alerts</span>
+          </h3>
+          {notifSaving && <span style={{ fontSize: '0.75rem', color: 'var(--primary)' }}>Saving...</span>}
+        </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', paddingBottom: '0.75rem', borderBottom: '1px solid var(--border-light)' }}>
@@ -421,10 +463,10 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
               <div style={{ fontWeight: 600, fontSize: '0.92rem', color: 'var(--text-primary)' }}>Post Published Alerts</div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Get notified immediately when scheduled content successfully goes live.</div>
             </div>
-            <input 
-              type="checkbox" 
-              checked={notifyPublish} 
-              onChange={(e) => setNotifyPublish(e.target.checked)} 
+            <input
+              type="checkbox"
+              checked={notifyPublish}
+              onChange={(e) => handleNotificationToggle('publish', e.target.checked)}
               style={{ width: '20px', height: '20px', accentColor: 'var(--primary)', cursor: 'pointer' }}
             />
           </label>
@@ -434,10 +476,10 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
               <div style={{ fontWeight: 600, fontSize: '0.92rem', color: 'var(--text-primary)' }}>Engagement Spike Alerts</div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Receive a notification when a post receives higher-than-average viral interaction.</div>
             </div>
-            <input 
-              type="checkbox" 
-              checked={notifyEngage} 
-              onChange={(e) => setNotifyEngage(e.target.checked)} 
+            <input
+              type="checkbox"
+              checked={notifyEngage}
+              onChange={(e) => handleNotificationToggle('engage', e.target.checked)}
               style={{ width: '20px', height: '20px', accentColor: 'var(--primary)', cursor: 'pointer' }}
             />
           </label>
@@ -447,24 +489,24 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
               <div style={{ fontWeight: 600, fontSize: '0.92rem', color: 'var(--text-primary)' }}>Daily Morning Digest Email</div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Receive a summary email at 8:00 AM detailing upcoming scheduled posts.</div>
             </div>
-            <input 
-              type="checkbox" 
-              checked={notifyEmail} 
-              onChange={(e) => setNotifyEmail(e.target.checked)} 
+            <input
+              type="checkbox"
+              checked={notifyEmail}
+              onChange={(e) => handleNotificationToggle('email', e.target.checked)}
               style={{ width: '20px', height: '20px', accentColor: 'var(--primary)', cursor: 'pointer' }}
             />
           </label>
         </div>
       </div>
 
-      {/* SECTION 4: Backend Connection Status */}
+      {/* SECTION 4: Backend Connection Status & Scheduler */}
       <div className="clean-card" style={{ padding: '1.75rem' }}>
         <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-primary)' }}>
           <Database size={20} color="var(--primary)" />
-          <span>4. Backend Health & Data Persistence</span>
+          <span>4. Backend Health & Background Scheduler</span>
         </h3>
         <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>
-          SocialSync checks the health of the Python Flask backend server and SQLite database.
+          Real-time diagnostics for Python Flask API server, SQLite persistent storage, and background publishing worker.
         </p>
 
         <div style={{
@@ -472,28 +514,55 @@ export default function Settings({ user, onUserUpdated, isDark, setIsDark }) {
           padding: '1.25rem',
           borderRadius: 'var(--radius-lg)',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
+          flexDirection: 'column',
           gap: '1rem'
         }}>
-          <div>
-            <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-primary)' }}>Python Flask API Server</div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Endpoint: http://127.0.0.1:5000/api/health</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div>
+              <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-primary)' }}>Flask API & SQLite Database</div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Endpoint: {`${API_BASE}/health`}</div>
+            </div>
+
+            {backendStatus === 'connected' ? (
+              <span className="badge badge-success" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>
+                <Check size={14} />
+                <span>Connected & Persisting to SQLite</span>
+              </span>
+            ) : backendStatus === 'checking' ? (
+              <span className="badge badge-neutral" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>Checking...</span>
+            ) : (
+              <span className="badge badge-danger" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>
+                <AlertCircle size={14} />
+                <span>Offline (Active in LocalStorage Fallback)</span>
+              </span>
+            )}
           </div>
 
-          {backendStatus === 'connected' ? (
-            <span className="badge badge-success" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>
-              <Check size={14} />
-              <span>Connected & Persisting to SQLite</span>
-            </span>
-          ) : backendStatus === 'checking' ? (
-            <span className="badge badge-neutral" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>Checking...</span>
-          ) : (
-            <span className="badge badge-danger" style={{ padding: '0.4rem 0.85rem', fontSize: '0.82rem' }}>
-              <AlertCircle size={14} />
-              <span>Offline (Using LocalStorage Fallback)</span>
-            </span>
+          {backendHealth && (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '0.75rem',
+              paddingTop: '0.75rem',
+              borderTop: '1px solid var(--border-light)',
+              fontSize: '0.82rem'
+            }}>
+              <div>
+                <span style={{ color: 'var(--text-muted)', display: 'block' }}>API Version:</span>
+                <strong>{backendHealth.version}</strong>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-muted)', display: 'block' }}>Storage Engine:</span>
+                <strong>{backendHealth.database}</strong>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-muted)', display: 'block' }}>Post Scheduler:</span>
+                <strong style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  <Clock size={12} />
+                  Active Background Daemon
+                </strong>
+              </div>
+            </div>
           )}
         </div>
 

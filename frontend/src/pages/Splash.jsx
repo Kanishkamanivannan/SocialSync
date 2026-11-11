@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import logoWhite from '../assets/logo-white.png';
-import { ArrowRight, Sparkles } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 
 export default function Splash({ onFinish }) {
   useEffect(() => {

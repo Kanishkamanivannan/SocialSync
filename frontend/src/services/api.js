@@ -1,216 +1,256 @@
-// SocialSync API Service with transparent localStorage fallback
-const API_BASE = 'http://127.0.0.1:5000/api';
+// SocialSync API Service with session cache cleanup, URL safety helpers, & full token handling
+const RAW_API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? '/api' : 'http://127.0.0.1:5000/api');
 
-// Initial fallback mock data stored in localStorage if backend is offline
-const INITIAL_STORAGE = {
-  user: {
-    id: 1,
-    name: 'Alex Morgan',
-    email: 'alex@socialsync.io',
-    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-    role: 'Lead Brand Strategist'
-  },
-  accounts: [
-    { id: 1, platform: 'Instagram', name: 'SocialSync Official', handle: '@socialsync_app', avatar: 'https://images.unsplash.com/photo-1611262588024-d12430b98920?w=120&auto=format&fit=crop&q=80', followers: 142500, following: 480, growth: '+12.4%', connected: 1 },
-    { id: 2, platform: 'Facebook', name: 'SocialSync Page', handle: '@socialsynchq', avatar: 'https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=120&auto=format&fit=crop&q=80', followers: 88400, following: 120, growth: '+5.8%', connected: 1 },
-    { id: 3, platform: 'X', name: 'SocialSync Tech', handle: '@socialsync_live', avatar: 'https://images.unsplash.com/photo-1611605698335-8b1569810432?w=120&auto=format&fit=crop&q=80', followers: 65200, following: 890, growth: '+18.2%', connected: 1 },
-    { id: 4, platform: 'LinkedIn', name: 'SocialSync Inc.', handle: 'company/socialsync', avatar: 'https://images.unsplash.com/photo-1611944212129-29977ae1398c?w=120&auto=format&fit=crop&q=80', followers: 34100, following: 50, growth: '+8.7%', connected: 1 },
-    { id: 5, platform: 'YouTube', name: 'SocialSync Studio', handle: '@SocialSyncStudio', avatar: 'https://images.unsplash.com/photo-1611162616475-46b635cb6868?w=120&auto=format&fit=crop&q=80', followers: 52900, following: 15, growth: '+14.1%', connected: 1 },
-    { id: 6, platform: 'TikTok', name: 'SocialSync Viral', handle: '@socialsync_now', avatar: 'https://images.unsplash.com/photo-1611605698323-b1e99cfd37ea?w=120&auto=format&fit=crop&q=80', followers: 215400, following: 310, growth: '+24.6%', connected: 1 }
-  ],
-  posts: [
-    {
-      id: 1,
-      content: '🚀 Unveiling our next-gen social intelligence suite! Schedule, analyze, and automate cross-platform growth seamlessly. #SocialMediaMarketing #AI #ProductLaunch',
-      platforms: ['Instagram', 'LinkedIn', 'X'],
-      media_url: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600&auto=format&fit=crop&q=80',
-      status: 'published',
-      scheduled_for: '2026-10-13 14:30:00',
-      created_at: '2026-10-13 10:00:00',
-      likes: 1420,
-      comments: 184,
-      shares: 96,
-      reach: 28400
-    },
-    {
-      id: 2,
-      content: '✨ 5 Proven Tips to Boost Instagram Engagement in 2026: 1. Authentic Reels 2. Interactive Polls 3. Consistent Timing 4. Direct DMs 5. Micro-influencer collabs! Save this for later 📌',
-      platforms: ['Instagram', 'TikTok'],
-      media_url: 'https://images.unsplash.com/photo-1611162618071-b39a2ec055fb?w=600&auto=format&fit=crop&q=80',
-      status: 'published',
-      scheduled_for: '2026-10-14 09:15:00',
-      created_at: '2026-10-14 08:00:00',
-      likes: 3890,
-      comments: 420,
-      shares: 312,
-      reach: 64200
-    },
-    {
-      id: 3,
-      content: '🎙️ Live Q&A this Thursday at 3 PM EST: How Top Brands 10x Their Social Reach with Unified Scheduling. RSVP link in bio!',
-      platforms: ['LinkedIn', 'X', 'Facebook'],
-      media_url: 'https://images.unsplash.com/photo-1515187029135-18ee286d815b?w=600&auto=format&fit=crop&q=80',
-      status: 'scheduled',
-      scheduled_for: '2026-10-16 15:00:00',
-      created_at: '2026-10-14 11:20:00',
-      likes: 0,
-      comments: 0,
-      shares: 0,
-      reach: 0
-    },
-    {
-      id: 4,
-      content: 'Behind the scenes at SocialSync HQ! Building the features you asked for. What tool would you love to see next? Drop a comment! 👇',
-      platforms: ['Instagram', 'YouTube'],
-      media_url: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=600&auto=format&fit=crop&q=80',
-      status: 'scheduled',
-      scheduled_for: '2026-10-17 12:00:00',
-      created_at: '2026-10-14 12:00:00',
-      likes: 0,
-      comments: 0,
-      shares: 0,
-      reach: 0
-    },
-    {
-      id: 5,
-      content: 'Drafting our Q4 Creator Growth Playbook: key benchmarks across TikTok vs YouTube Shorts. Looking for beta readers!',
-      platforms: ['X', 'LinkedIn'],
-      media_url: null,
-      status: 'draft',
-      scheduled_for: null,
-      created_at: '2026-10-14 14:00:00',
-      likes: 0,
-      comments: 0,
-      shares: 0,
-      reach: 0
-    }
-  ],
-  campaigns: [
-    { id: 1, title: 'Q4 Product Launch Blitz', description: 'Cross-platform blitz to introduce SocialSync 2.0 to enterprise creators.', status: 'active', progress: 72, target_reach: 100000, current_reach: 72400, budget: '$3,200', start_date: '2026-10-01', end_date: '2026-11-15' },
-    { id: 2, title: 'Holiday Creator Giveaway', description: 'Instagram & TikTok interactive campaign driving app downloads.', status: 'active', progress: 45, target_reach: 80000, current_reach: 36000, budget: '$2,000', start_date: '2026-10-10', end_date: '2026-11-30' },
-    { id: 3, title: 'Thought Leadership Series', description: 'Weekly CEO interview highlights distributed across LinkedIn and X.', status: 'planning', progress: 20, target_reach: 45000, current_reach: 9000, budget: '$1,100', start_date: '2026-10-20', end_date: '2026-12-15' }
-  ],
-  activity: [
-    { id: 1, type: 'follower', title: 'New Milestone Reached', description: 'Instagram passed 140K followers with +12.4% weekly surge.', platform: 'Instagram', created_at: '10m ago' },
-    { id: 2, type: 'post', title: 'Post Published Automatically', description: "'5 Proven Tips to Boost Instagram Engagement' published to 2 platforms.", platform: 'Instagram', created_at: '45m ago' },
-    { id: 3, type: 'like', title: 'Surge in Engagements', description: 'LinkedIn campaign reached 2,400+ reactions in under 4 hours.', platform: 'LinkedIn', created_at: '2h ago' },
-    { id: 4, type: 'schedule', title: 'Post Scheduled', description: 'Live Q&A teaser scheduled for Thursday at 3:00 PM.', platform: 'X', created_at: '3h ago' },
-    { id: 5, type: 'account', title: 'Account Re-synced', description: 'YouTube Studio analytics synchronized with zero errors.', platform: 'YouTube', created_at: '5h ago' }
-  ]
-};
+export const API_BASE = RAW_API_BASE.replace(/\/+$/, '');
 
-// Initialize localStorage fallback if missing
-function initLocalStorage() {
-  if (typeof window === 'undefined') return;
-  if (!localStorage.getItem('socialsync_initialized')) {
-    localStorage.setItem('socialsync_user', JSON.stringify(INITIAL_STORAGE.user));
-    localStorage.setItem('socialsync_accounts', JSON.stringify(INITIAL_STORAGE.accounts));
-    localStorage.setItem('socialsync_posts', JSON.stringify(INITIAL_STORAGE.posts));
-    localStorage.setItem('socialsync_campaigns', JSON.stringify(INITIAL_STORAGE.campaigns));
-    localStorage.setItem('socialsync_activity', JSON.stringify(INITIAL_STORAGE.activity));
-    localStorage.setItem('socialsync_initialized', 'true');
+const TRUSTED_OAUTH_HOSTS = new Set([
+  'www.facebook.com',
+  'facebook.com',
+  'api.instagram.com',
+  'accounts.google.com',
+]);
+
+export function isSafeHttpUrl(value, allowRelativeUpload = false) {
+  if (!value || typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (allowRelativeUpload && /^\/uploads\/[a-zA-Z0-9._-]+$/.test(trimmed)) {
+    return true;
+  }
+  if (trimmed.startsWith('//')) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
   }
 }
-initLocalStorage();
 
-// Universal request helper
-async function request(endpoint, options = {}) {
+export function isTrustedOAuthUrl(value) {
+  if (!value || typeof value !== 'string') return false;
   try {
-    const res = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {})
-      }
-    });
-    if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.warn(`Backend connection failed (${endpoint}). Using offline fallback.`, err.message);
-    return null; // Signals to use fallback
+    const parsed = new URL(value.trim());
+    return parsed.protocol === 'https:' && TRUSTED_OAUTH_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
   }
+}
+
+export function clearSessionStorageCaches() {
+  if (typeof window === 'undefined') return;
+  [
+    'socialsync_token',
+    'socialsync_user',
+    'socialsync_accounts',
+    'socialsync_posts',
+    'socialsync_campaigns',
+    'socialsync_activity',
+    'socialsync_initialized',
+  ].forEach((key) => localStorage.removeItem(key));
+}
+
+export class ApiError extends Error {
+  constructor(message, status = 500, data = null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.data = data;
+  }
+}
+
+// Universal request helper with token header.
+// Backend HTTP error responses (4xx/5xx) throw ApiError rather than falling back to fake offline data.
+async function request(endpoint, options = {}, allowOfflineFallback = true) {
+  let res;
+  try {
+    const token = localStorage.getItem('socialsync_token');
+    const usableToken = token && token !== 'local_offline_token' ? token : null;
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(usableToken ? { 'Authorization': `Bearer ${usableToken}` } : {}),
+      ...(options.headers || {})
+    };
+
+    // If uploading FormData, delete Content-Type to let browser set boundary
+    if (options.body instanceof FormData) {
+      delete headers['Content-Type'];
+    }
+
+    res = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers
+    });
+  } catch (networkErr) {
+    if (allowOfflineFallback) {
+      console.warn(`Backend unreachable (${endpoint}). Using offline fallback.`, networkErr.message);
+      return null;
+    }
+    throw new ApiError(`Cannot reach SocialSync backend server (${API_BASE}).`, 0, null);
+  }
+
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+
+  if (
+    res.status === 401 &&
+    endpoint !== '/auth/login' &&
+    endpoint !== '/auth/register' &&
+    endpoint !== '/auth/logout'
+  ) {
+    clearSessionStorageCaches();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('socialsync-auth-expired'));
+    }
+  }
+
+  if (!res.ok) {
+    const errMsg =
+      payload?.error ||
+      payload?.message ||
+      `HTTP Error ${res.status}`;
+    throw new ApiError(errMsg, res.status, payload);
+  }
+
+  return payload;
 }
 
 export const api = {
   // --- AUTH ---
   async login(email, password) {
-    const data = await request('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password })
-    });
-    if (data && data.success) {
-      localStorage.setItem('socialsync_user', JSON.stringify(data.user));
-      return data;
+    try {
+      const data = await request('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password })
+      }, false);
+      if (data && data.success && data.token) {
+        localStorage.setItem('socialsync_token', data.token);
+        localStorage.setItem('socialsync_user', JSON.stringify(data.user));
+        return data;
+      }
+      return { success: false, message: data?.message || 'Authentication failed.' };
+    } catch (err) {
+      if (err instanceof ApiError && err.status > 0) {
+        return { success: false, message: err.message };
+      }
+      throw err;
     }
-    // Fallback: Check local storage or match default
-    const stored = JSON.parse(localStorage.getItem('socialsync_user') || 'null');
-    if (stored && (email === stored.email || email === 'alex@socialsync.io')) {
-      return { success: true, user: stored, token: 'local_token' };
-    }
-    // Allow demo entry
-    const demoUser = {
-      id: 1,
-      name: email.split('@')[0] || 'SocialSync User',
-      email,
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      role: 'Brand Manager'
-    };
-    localStorage.setItem('socialsync_user', JSON.stringify(demoUser));
-    return { success: true, user: demoUser, token: 'local_token' };
   },
 
   async register(name, email, password) {
-    const data = await request('/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ name, email, password })
-    });
-    if (data && data.success) {
-      localStorage.setItem('socialsync_user', JSON.stringify(data.user));
-      return data;
+    try {
+      const data = await request('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, password })
+      }, false);
+      if (data && data.success && data.token) {
+        localStorage.setItem('socialsync_token', data.token);
+        localStorage.setItem('socialsync_user', JSON.stringify(data.user));
+        return data;
+      }
+      return { success: false, message: data?.message || 'Registration failed.' };
+    } catch (err) {
+      if (err instanceof ApiError && err.status > 0) {
+        return { success: false, message: err.message };
+      }
+      throw err;
     }
-    // Fallback
-    const newUser = {
-      id: Date.now(),
-      name,
-      email,
-      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-      role: 'Social Media Manager'
-    };
-    localStorage.setItem('socialsync_user', JSON.stringify(newUser));
-    return { success: true, user: newUser, token: 'local_token' };
   },
 
   async getMe() {
-    const data = await request('/auth/me');
+    const token = localStorage.getItem('socialsync_token');
+    if (!token || token === 'local_offline_token') {
+      return null;
+    }
+    const data = await request('/auth/me', {}, false);
     if (data && !data.error) {
       localStorage.setItem('socialsync_user', JSON.stringify(data));
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_user') || JSON.stringify(INITIAL_STORAGE.user));
+    return null;
   },
 
   async updateProfile(userData) {
     const data = await request('/auth/profile', {
       method: 'PUT',
       body: JSON.stringify(userData)
-    });
+    }, false);
     if (data && data.success && data.user) {
       localStorage.setItem('socialsync_user', JSON.stringify(data.user));
       return { success: true, user: data.user };
     }
-    // Local fallback if offline
-    const currentUser = JSON.parse(localStorage.getItem('socialsync_user') || JSON.stringify(INITIAL_STORAGE.user));
-    const updated = {
-      ...currentUser,
-      ...userData,
-      name: userData.name || currentUser.name,
-      username: userData.username || currentUser.username || '@' + (userData.name || currentUser.name).toLowerCase().replace(' ', ''),
-      email: userData.email || currentUser.email,
-      role: userData.role || currentUser.role,
-      avatar: userData.avatar || currentUser.avatar
-    };
-    localStorage.setItem('socialsync_user', JSON.stringify(updated));
-    return { success: true, user: updated };
+    return data || { success: false, message: 'Failed to update profile.' };
+  },
+
+  async logout() {
+    try {
+      const token = localStorage.getItem('socialsync_token');
+      if (token && token !== 'local_offline_token') {
+        await request('/auth/logout', { method: 'POST' }, true);
+      }
+    } catch {
+      // Best-effort revocation; local session caches are always cleared.
+    } finally {
+      clearSessionStorageCaches();
+    }
+  },
+
+  async getHealth() {
+    const res = await fetch(`${API_BASE}/health`);
+    if (!res.ok) {
+      throw new ApiError(`Health check failed (HTTP ${res.status})`, res.status, null);
+    }
+    return await res.json();
+  },
+
+  // --- NOTIFICATION SETTINGS ---
+  async getNotificationSettings() {
+    return await request('/settings/notifications', {}, false);
+  },
+
+  async updateNotificationSettings(settings) {
+    return await request('/settings/notifications', {
+      method: 'PUT',
+      body: JSON.stringify(settings)
+    }, false);
+  },
+
+  // --- OAUTH 2.0 INTEGRATIONS ---
+  async getOAuthStatus() {
+    return await request('/oauth/config-status', {}, false);
+  },
+
+  async startOAuth(provider, method = null) {
+    const params = new URLSearchParams();
+    if (method) params.set('method', method);
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      params.set('origin', window.location.origin);
+    }
+    const qs = params.toString();
+    const query = qs ? `?${qs}` : '';
+    return await request(`/oauth/${provider.toLowerCase()}/start${query}`, {}, false);
+  },
+
+  async getMetaPages() {
+    return await request('/oauth/meta/pages', {}, false);
+  },
+
+  async selectMetaPage(pageId) {
+    return await request('/oauth/meta/select-page', {
+      method: 'POST',
+      body: JSON.stringify({ page_id: pageId })
+    }, false);
+  },
+
+  async disconnectOAuth(platform) {
+    return await request(`/oauth/${platform.toLowerCase()}/disconnect`, {
+      method: 'POST'
+    }, false);
   },
 
   // --- ACCOUNTS ---
@@ -220,12 +260,17 @@ export const api = {
       localStorage.setItem('socialsync_accounts', JSON.stringify(data));
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_accounts') || JSON.stringify(INITIAL_STORAGE.accounts));
+    return JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
   },
 
   async toggleAccount(id) {
     const data = await request(`/accounts/${id}/toggle`, { method: 'POST' });
-    if (data && data.id) return data;
+    if (data && data.id) {
+      const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
+      const updated = accounts.map(a => a.id === id ? data : a);
+      localStorage.setItem('socialsync_accounts', JSON.stringify(updated));
+      return data;
+    }
     // Fallback
     const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
     const updated = accounts.map(a => a.id === id ? { ...a, connected: a.connected ? 0 : 1 } : a);
@@ -233,45 +278,84 @@ export const api = {
     return updated.find(a => a.id === id);
   },
 
+  async syncAccount(id) {
+    return await request(`/accounts/${id}/sync`, { method: 'POST' }, false);
+  },
+
+  async syncAllAccounts() {
+    const data = await request('/accounts/sync-all', { method: 'POST' }, false);
+    if (data && data.accounts) {
+      localStorage.setItem('socialsync_accounts', JSON.stringify(data.accounts));
+      return data;
+    }
+    throw new ApiError('Sync failed: unexpected response from backend.', 500, data);
+  },
+
+  // --- MEDIA UPLOAD ---
+  async uploadMedia(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await request('/upload', {
+      method: 'POST',
+      body: formData
+    }, false);
+    return data;
+  },
+
   // --- POSTS ---
-  async getPosts(status = 'all') {
-    const query = status && status !== 'all' ? `?status=${status}` : '';
+  async getPosts(status = 'all', search = '', campaignId = '') {
+    let query = '?';
+    if (status && status !== 'all') query += `status=${status}&`;
+    if (search) query += `search=${encodeURIComponent(search)}&`;
+    if (campaignId) query += `campaign_id=${campaignId}&`;
+    query = query.replace(/[?&]$/, '');
+
     const data = await request(`/posts${query}`);
     if (data && Array.isArray(data)) {
       localStorage.setItem('socialsync_posts', JSON.stringify(data));
       return data;
     }
-    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || JSON.stringify(INITIAL_STORAGE.posts));
+    let posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
     if (status && status !== 'all') {
-      return posts.filter(p => p.status === status);
+      posts = posts.filter(p => p.status === status);
+    }
+    if (campaignId) {
+      posts = posts.filter(p => String(p.campaign_id) === String(campaignId));
+    }
+    if (search) {
+      const s = search.toLowerCase();
+      posts = posts.filter(p => p.content.toLowerCase().includes(s));
     }
     return posts;
   },
 
   async createPost(postData) {
+    const isLive = postData?.publish_mode === 'live';
     const data = await request('/posts', {
       method: 'POST',
       body: JSON.stringify(postData)
-    });
+    }, !isLive);
     if (data && data.id) {
-      // update local
       const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
       localStorage.setItem('socialsync_posts', JSON.stringify([data, ...posts]));
       return data;
     }
-    // Fallback
+    // Offline fallback ONLY for non-live (Sandbox/Draft) mode when backend is unreachable
     const newPost = {
       id: Date.now(),
+      campaign_id: postData.campaign_id || null,
       content: postData.content,
       platforms: postData.platforms || ['Instagram'],
       media_url: postData.media_url || null,
+      media_type: postData.media_type || (postData.media_url ? 'image' : 'text'),
+      publish_mode: 'sandbox',
       status: postData.status || 'draft',
       scheduled_for: postData.scheduled_for || null,
-      created_at: new Date().toISOString(),
-      likes: 0,
-      comments: 0,
-      shares: 0,
-      reach: 0
+      created_at: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      likes: postData.status === 'published' ? Math.floor(Math.random() * 120 + 20) : 0,
+      comments: postData.status === 'published' ? Math.floor(Math.random() * 25 + 5) : 0,
+      shares: postData.status === 'published' ? Math.floor(Math.random() * 15 + 2) : 0,
+      reach: postData.status === 'published' ? Math.floor(Math.random() * 2400 + 800) : 0
     };
     const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
     const updated = [newPost, ...posts];
@@ -280,17 +364,18 @@ export const api = {
   },
 
   async updatePost(id, postData) {
+    const isLive = postData?.publish_mode === 'live';
     const data = await request(`/posts/${id}`, {
       method: 'PUT',
       body: JSON.stringify(postData)
-    });
+    }, !isLive);
     if (data && data.id) {
       const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
       const updated = posts.map(p => p.id === id ? data : p);
       localStorage.setItem('socialsync_posts', JSON.stringify(updated));
       return data;
     }
-    // Fallback
+    // Offline fallback only when backend is unreachable in non-live mode
     const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
     const updated = posts.map(p => p.id === id ? { ...p, ...postData } : p);
     localStorage.setItem('socialsync_posts', JSON.stringify(updated));
@@ -312,7 +397,7 @@ export const api = {
       localStorage.setItem('socialsync_campaigns', JSON.stringify(data));
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_campaigns') || JSON.stringify(INITIAL_STORAGE.campaigns));
+    return JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
   },
 
   async createCampaign(campData) {
@@ -342,37 +427,70 @@ export const api = {
     return newCamp;
   },
 
+  async updateCampaign(id, campData) {
+    const data = await request(`/campaigns/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(campData)
+    });
+    if (data && data.id) {
+      const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+      const updated = camps.map(c => c.id === id ? data : c);
+      localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+      return data;
+    }
+    // Fallback
+    const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+    const updated = camps.map(c => c.id === id ? { ...c, ...campData } : c);
+    localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+    return updated.find(c => c.id === id);
+  },
+
+  async deleteCampaign(id) {
+    const data = await request(`/campaigns/${id}`, { method: 'DELETE' });
+    const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+    const updated = camps.filter(c => c.id !== id);
+    localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+    return data || { success: true };
+  },
+
   // --- ANALYTICS ---
-  async getAnalytics() {
-    const data = await request('/analytics');
+  async getAnalytics(range = '7d') {
+    const data = await request(`/analytics?range=${range}`);
     if (data && data.summary) return data;
+
     return {
       summary: {
-        total_followers: 514500,
-        total_following: 1865,
-        weekly_growth: '+14.8%',
-        total_posts: 48,
-        total_likes: 24600,
-        total_reach: 854000,
-        engagement_rate: '6.4%'
+        total_followers: 0,
+        total_following: 0,
+        weekly_growth: '0%',
+        total_posts: 0,
+        total_likes: 0,
+        total_reach: 0,
+        total_interactions: 0,
+        engagement_rate: '0%',
+        range
       },
-      history: [
-        { day: 'Mon', followers: 482000, impressions: 125000, engagement: 4.8 },
-        { day: 'Tue', followers: 486500, impressions: 142000, engagement: 5.2 },
-        { day: 'Wed', followers: 492000, impressions: 158000, engagement: 5.6 },
-        { day: 'Thu', followers: 498400, impressions: 169000, engagement: 6.1 },
-        { day: 'Fri', followers: 504200, impressions: 185000, engagement: 6.4 },
-        { day: 'Sat', followers: 509800, impressions: 198000, engagement: 6.8 },
-        { day: 'Sun', followers: 514500, impressions: 215000, engagement: 7.3 }
-      ],
-      platforms: [
-        { platform: 'Instagram', percentage: 28, color: '#E1306C' },
-        { platform: 'TikTok', percentage: 42, color: '#000000' },
-        { platform: 'Facebook', percentage: 17, color: '#1877F2' },
-        { platform: 'YouTube', percentage: 10, color: '#FF0000' },
-        { platform: 'LinkedIn', percentage: 7, color: '#0A66C2' },
-        { platform: 'X', percentage: 13, color: '#1DA1F2' }
-      ]
+      history: [],
+      platforms: []
+    };
+  },
+
+  // --- GLOBAL SEARCH ---
+  async search(query) {
+    if (!query) return { posts: [], accounts: [], campaigns: [] };
+    const data = await request(`/search?q=${encodeURIComponent(query)}`);
+    if (data && data.posts) return data;
+
+    // Fallback search
+    const q = query.toLowerCase();
+    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
+    const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
+    const campaigns = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+
+    return {
+      posts: posts.filter(p => p.content.toLowerCase().includes(q)).slice(0, 6),
+      accounts: accounts.filter(a => a.name.toLowerCase().includes(q) || a.handle.toLowerCase().includes(q) || a.platform.toLowerCase().includes(q)).slice(0, 6),
+      campaigns: campaigns.filter(c => c.title.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)).slice(0, 6)
     };
   },
 
@@ -383,6 +501,6 @@ export const api = {
       localStorage.setItem('socialsync_activity', JSON.stringify(data));
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_activity') || JSON.stringify(INITIAL_STORAGE.activity));
+    return JSON.parse(localStorage.getItem('socialsync_activity') || '[]');
   }
 };

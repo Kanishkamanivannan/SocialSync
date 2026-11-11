@@ -11,8 +11,30 @@ import Campaigns from './pages/Campaigns';
 import Settings from './pages/Settings';
 import Sidebar from './components/Sidebar';
 import Navbar from './components/Navbar';
-import { api } from './services/api';
+import { api, API_BASE, clearSessionStorageCaches } from './services/api';
 import './App.css';
+
+const hasValidSessionToken = () => {
+  const token = localStorage.getItem('socialsync_token');
+  return Boolean(token && token !== 'local_offline_token');
+};
+
+const ALLOWED_OAUTH_ORIGINS = (() => {
+  const origins = new Set();
+  if (typeof window !== 'undefined') {
+    origins.add(window.location.origin);
+    try {
+      origins.add(new URL(API_BASE, window.location.origin).origin);
+    } catch {
+      // Ignore invalid API_BASE
+    }
+    if (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') {
+      origins.add('http://127.0.0.1:5000');
+      origins.add('http://localhost:5000');
+    }
+  }
+  return origins;
+})();
 
 export default function App() {
   // Navigation State: 'splash' | 'onboarding' | 'auth' | 'app'
@@ -20,7 +42,7 @@ export default function App() {
     const savedUser = localStorage.getItem('socialsync_user');
     const hasSeenSplash = sessionStorage.getItem('socialsync_seen_splash');
     if (!hasSeenSplash) return 'splash';
-    return savedUser ? 'app' : 'onboarding';
+    return savedUser && hasValidSessionToken() ? 'app' : 'onboarding';
   });
 
   const [authMode, setAuthMode] = useState('login');
@@ -33,6 +55,7 @@ export default function App() {
   // App Data State
   const [user, setUser] = useState(() => {
     try {
+      if (!hasValidSessionToken()) return null;
       const saved = localStorage.getItem('socialsync_user');
       return saved ? JSON.parse(saved) : null;
     } catch {
@@ -45,7 +68,6 @@ export default function App() {
   const [campaigns, setCampaigns] = useState([]);
   const [activity, setActivity] = useState([]);
   const [analytics, setAnalytics] = useState(null);
-  const [loading, setLoading] = useState(true);
 
   // Apply dark theme class to document root
   useEffect(() => {
@@ -58,8 +80,9 @@ export default function App() {
     }
   }, [isDark]);
 
-  // Load Initial Data from Backend & LocalStorage
+  // Load Initial Data from Backend
   const loadData = async () => {
+    if (!hasValidSessionToken()) return;
     try {
       const [u, accs, psts, camps, acts, anlt] = await Promise.all([
         api.getMe(),
@@ -77,13 +100,69 @@ export default function App() {
       setAnalytics(anlt || null);
     } catch (err) {
       console.error('Error loading SocialSync data:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
+  const [oauthNotice, setOauthNotice] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get('oauth_status');
+    if (!status) return null;
+    const provider = params.get('provider');
+    const providerLabel = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} ` : '';
+    return {
+      type: status === 'success' ? 'success' : 'error',
+      text: status === 'success'
+        ? `${providerLabel}social account connected successfully.`
+        : `${providerLabel}OAuth authorization failed. Please try again.`
+    };
+  });
+
   useEffect(() => {
-    loadData();
+    if (hasValidSessionToken()) {
+      loadData();
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('oauth_status')) {
+      const cleanUrl = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, document.title, cleanUrl);
+      Promise.resolve().then(() => {
+        setCurrentTab('accounts');
+      });
+    }
+
+    const handleOAuthMessage = (event) => {
+      if (!ALLOWED_OAUTH_ORIGINS.has(event.origin)) return;
+      const data = event?.data;
+      if (!data || data.type !== 'socialsync-oauth') return;
+      setOauthNotice({
+        type: data.success ? 'success' : 'error',
+        text: data.success
+          ? (data.message || 'Social media account connected successfully!')
+          : (data.error || data.message || 'OAuth authorization failed.')
+      });
+      setCurrentTab('accounts');
+      loadData();
+    };
+
+    const handleAuthExpired = () => {
+      clearSessionStorageCaches();
+      setUser(null);
+      setAccounts([]);
+      setPosts([]);
+      setCampaigns([]);
+      setActivity([]);
+      setAnalytics(null);
+      setCurrentView('auth');
+      setAuthMode('login');
+    };
+
+    window.addEventListener('message', handleOAuthMessage);
+    window.addEventListener('socialsync-auth-expired', handleAuthExpired);
+    return () => {
+      window.removeEventListener('message', handleOAuthMessage);
+      window.removeEventListener('socialsync-auth-expired', handleAuthExpired);
+    };
   }, []);
 
   // Auth Handlers
@@ -94,16 +173,21 @@ export default function App() {
     loadData();
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('socialsync_user');
+  const handleLogout = async () => {
+    await api.logout();
     setUser(null);
+    setAccounts([]);
+    setPosts([]);
+    setCampaigns([]);
+    setActivity([]);
+    setAnalytics(null);
     setCurrentView('auth');
     setAuthMode('login');
   };
 
   const handleSplashFinish = () => {
     sessionStorage.setItem('socialsync_seen_splash', 'true');
-    setCurrentView(user ? 'app' : 'onboarding');
+    setCurrentView(user && hasValidSessionToken() ? 'app' : 'onboarding');
   };
 
   // State Updates from Pages
@@ -130,8 +214,36 @@ export default function App() {
     loadData();
   };
 
+  const handleAccountsSynced = (syncResponse) => {
+    const nextAccounts = Array.isArray(syncResponse)
+      ? syncResponse
+      : (Array.isArray(syncResponse?.accounts) ? syncResponse.accounts : null);
+    if (nextAccounts) {
+      setAccounts(nextAccounts);
+    }
+    loadData();
+  };
+
   const handleCampaignCreated = (newCamp) => {
     setCampaigns(prev => [newCamp, ...prev]);
+    loadData();
+  };
+
+  const handleCampaignUpdated = (updatedCamp) => {
+    setCampaigns(prev => prev.map(c => c.id === updatedCamp.id ? updatedCamp : c));
+    loadData();
+  };
+
+  const handleCampaignDeleted = (deletedId) => {
+    setCampaigns(prev => prev.filter(c => c.id !== deletedId));
+    loadData();
+  };
+
+  // Quick navigation from Search
+  const handleSearchSelect = (type) => {
+    if (type === 'post') setCurrentTab('calendar');
+    else if (type === 'account') setCurrentTab('accounts');
+    else if (type === 'campaign') setCurrentTab('campaigns');
   };
 
   // 1. Splash Screen View
@@ -212,6 +324,10 @@ export default function App() {
           setIsDark={setIsDark}
           user={user}
           activity={activity}
+          posts={posts}
+          accounts={accounts}
+          campaigns={campaigns}
+          onSearchSelect={handleSearchSelect}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
         />
 
@@ -228,6 +344,8 @@ export default function App() {
 
           {currentTab === 'compose' && (
             <Compose
+              accounts={accounts}
+              campaigns={campaigns}
               onPostCreated={handlePostCreated}
               onNavigate={setCurrentTab}
             />
@@ -246,6 +364,10 @@ export default function App() {
             <Accounts
               accounts={accounts}
               onAccountUpdated={handleAccountUpdated}
+              onAccountsSynced={handleAccountsSynced}
+              onRefreshData={loadData}
+              oauthNotice={oauthNotice}
+              onClearOAuthNotice={() => setOauthNotice(null)}
             />
           )}
 
@@ -253,13 +375,17 @@ export default function App() {
             <Analytics
               analytics={analytics}
               posts={posts}
+              onReloadAnalytics={loadData}
             />
           )}
 
           {currentTab === 'campaigns' && (
             <Campaigns
               campaigns={campaigns}
+              posts={posts}
               onCampaignCreated={handleCampaignCreated}
+              onCampaignUpdated={handleCampaignUpdated}
+              onCampaignDeleted={handleCampaignDeleted}
             />
           )}
 
