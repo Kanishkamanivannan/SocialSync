@@ -1,7 +1,21 @@
 import React, { useState } from 'react';
-import logoLight from '../assets/logo.png';
+import logoWhite from '../assets/logo-white.png';
 import { api } from '../services/api';
-import { Mail, Lock, User, ArrowRight, Eye, EyeOff, AlertCircle, CheckCircle2, Sparkles } from 'lucide-react';
+import {
+  Mail,
+  Lock,
+  User,
+  ArrowLeft,
+  ArrowRight,
+  Eye,
+  EyeOff,
+  AlertCircle,
+  CheckCircle2,
+  Sparkles,
+  ShieldCheck,
+  CalendarDays,
+  Share2
+} from 'lucide-react';
 
 const DEMO_EMAIL = import.meta.env.DEV ? (import.meta.env.VITE_DEMO_EMAIL || '') : '';
 const DEMO_PASSWORD = import.meta.env.DEV ? (import.meta.env.VITE_DEMO_PASSWORD || '') : '';
@@ -14,7 +28,7 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
-  
+
   const [errors, setErrors] = useState({});
   const [generalError, setGeneralError] = useState('');
   const [infoMessage, setInfoMessage] = useState('');
@@ -100,270 +114,333 @@ export default function Auth({ onAuthSuccess, initialMode = 'login', onBack }) {
     setInfoMessage('Password reset instructions have been sent to your email address.');
   };
 
+  const switchMode = (loginMode) => {
+    setIsLogin(loginMode);
+    setErrors({});
+    setGeneralError('');
+    setInfoMessage('');
+  };
+
   return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: 'var(--bg-app)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '2rem 1rem'
-    }}>
-      <div 
-        className="clean-card animate-fade-in"
+    <div
+      style={{
+        minHeight: '100vh',
+        backgroundColor: 'var(--bg-app)',
+        backgroundImage:
+          'radial-gradient(at 10% 10%, rgba(99, 91, 255, 0.12) 0px, transparent 48%), radial-gradient(at 90% 85%, rgba(139, 92, 246, 0.1) 0px, transparent 50%)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '1.5rem'
+      }}
+    >
+      <div
+        className="clean-card ss-grid-2 animate-fade-in"
         style={{
+          maxWidth: '980px',
           width: '100%',
-          maxWidth: '440px',
-          padding: '2.25rem',
-          backgroundColor: 'var(--bg-surface)'
+          overflow: 'hidden',
+          padding: 0,
+          gap: 0,
+          borderRadius: '22px',
+          boxShadow: 'var(--shadow-lg)'
         }}
       >
-        {/* Brand Header */}
-        <div style={{ textAlign: 'center', marginBottom: '1.75rem' }}>
-          <div 
-            onClick={onBack}
-            style={{ 
-              display: 'inline-flex', 
-              alignItems: 'center', 
-              gap: '0.6rem', 
-              cursor: 'pointer',
-              marginBottom: '0.75rem'
-            }}
-          >
-            <img src={logoLight} alt="SocialSync Logo" style={{ width: '36px', height: '36px', objectFit: 'contain' }} />
-            <span style={{ 
-              fontWeight: 800, 
-              fontSize: '1.35rem', 
-              color: 'var(--primary)',
-              fontFamily: 'var(--font-display)',
-              letterSpacing: '-0.02em'
-            }}>
-              SocialSync
-            </span>
-          </div>
-
-          <h2 style={{ fontSize: '1.35rem', marginBottom: '0.25rem' }}>
-            {isLogin ? 'Welcome Back' : 'Create Your Account'}
-          </h2>
-          <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
-            {isLogin ? 'Sign in to access your social media dashboard' : 'Join SocialSync to start managing your channels'}
-          </p>
-        </div>
-
-        {/* Tab Switcher */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          padding: '4px',
-          backgroundColor: 'var(--bg-muted)',
-          borderRadius: 'var(--radius-md)',
-          marginBottom: '1.5rem'
-        }}>
-          <button
-            type="button"
-            onClick={() => { setIsLogin(true); setErrors({}); setGeneralError(''); }}
-            style={{
-              padding: '0.55rem',
-              borderRadius: 'var(--radius-sm)',
-              border: 'none',
-              backgroundColor: isLogin ? 'var(--bg-surface)' : 'transparent',
-              color: isLogin ? 'var(--primary)' : 'var(--text-secondary)',
-              fontWeight: 700,
-              fontSize: '0.88rem',
-              cursor: 'pointer',
-              boxShadow: isLogin ? 'var(--shadow-sm)' : 'none',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            onClick={() => { setIsLogin(false); setErrors({}); setGeneralError(''); }}
-            style={{
-              padding: '0.55rem',
-              borderRadius: 'var(--radius-sm)',
-              border: 'none',
-              backgroundColor: !isLogin ? 'var(--bg-surface)' : 'transparent',
-              color: !isLogin ? 'var(--primary)' : 'var(--text-secondary)',
-              fontWeight: 700,
-              fontSize: '0.88rem',
-              cursor: 'pointer',
-              boxShadow: !isLogin ? 'var(--shadow-sm)' : 'none',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            Sign Up
-          </button>
-        </div>
-
-        {/* General Error Alert */}
-        {generalError && (
-          <div style={{
-            backgroundColor: 'var(--danger-bg)',
-            color: 'var(--danger)',
-            padding: '0.75rem 0.9rem',
-            borderRadius: 'var(--radius-md)',
-            fontSize: '0.84rem',
+        {/* Left Visual Identity Panel */}
+        <div
+          style={{
+            background: 'linear-gradient(155deg, #1E1B4B 0%, #3730A3 52%, #6D28D9 100%)',
+            color: '#FFFFFF',
+            padding: '2.5rem 2.25rem',
             display: 'flex',
-            alignItems: 'flex-start',
-            gap: '0.5rem',
-            marginBottom: '1.25rem'
-          }}>
-            <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
-            <span>{generalError}</span>
-          </div>
-        )}
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            position: 'relative',
+            overflow: 'hidden'
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              width: '260px',
+              height: '260px',
+              borderRadius: '50%',
+              background: 'radial-gradient(circle, rgba(167, 139, 250, 0.35) 0%, transparent 70%)',
+              bottom: '-80px',
+              right: '-60px',
+              pointerEvents: 'none'
+            }}
+          />
 
-        {/* Info Notification */}
-        {infoMessage && (
-          <div style={{
-            backgroundColor: 'var(--success-bg)',
-            color: 'var(--success)',
-            padding: '0.75rem 0.9rem',
-            borderRadius: 'var(--radius-md)',
-            fontSize: '0.84rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            marginBottom: '1.25rem'
-          }}>
-            <CheckCircle2 size={16} />
-            <span>{infoMessage}</span>
-          </div>
-        )}
-
-        {/* Form */}
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
-          {!isLogin && (
-            <div className="form-group">
-              <label className="form-label">Full Name</label>
-              <div style={{ position: 'relative' }}>
-                <User size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '12px' }} />
-                <input
-                  type="text"
-                  placeholder="e.g. Alex Morgan"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="form-input"
-                  style={{ paddingLeft: '2.4rem' }}
-                />
+          <div style={{ position: 'relative', zIndex: 2 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.7rem', marginBottom: '2rem' }}>
+              <div
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '11px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.15)',
+                  border: '1px solid rgba(255, 255, 255, 0.25)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+              >
+                <img src={logoWhite} alt="SocialSync" style={{ width: '22px', height: '22px', objectFit: 'contain' }} />
               </div>
-              {errors.name && <span className="form-error">{errors.name}</span>}
+              <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+                SocialSync
+              </span>
+            </div>
+
+            <h2 style={{ color: '#FFFFFF', fontSize: '1.85rem', fontWeight: 800, lineHeight: 1.2, marginBottom: '0.9rem' }}>
+              Publish Smarter Across Every Channel
+            </h2>
+            <p style={{ color: '#C7D2FE', fontSize: '0.92rem', lineHeight: 1.6, marginBottom: '2rem' }}>
+              Connect Instagram, Facebook Pages, and YouTube with encrypted token storage and safe sandbox workflows.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.95rem' }}>
+              {[
+                { icon: Share2, title: 'Multi-Channel Publishing', sub: 'Native posts, reels & videos from one composer' },
+                { icon: CalendarDays, title: 'Precision Scheduling', sub: 'Automated background queue & live status tracking' },
+                { icon: ShieldCheck, title: 'AES-256-GCM Security', sub: 'Server-side encrypted OAuth token management' }
+              ].map((feat) => {
+                const Icon = feat.icon;
+                return (
+                  <div key={feat.title} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                    <div
+                      style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '9px',
+                        backgroundColor: 'rgba(255, 255, 255, 0.14)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0
+                      }}
+                    >
+                      <Icon size={16} color="#E0E7FF" />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#FFFFFF' }}>{feat.title}</div>
+                      <div style={{ fontSize: '0.77rem', color: '#C7D2FE' }}>{feat.sub}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div
+            style={{
+              marginTop: '2.25rem',
+              paddingTop: '1rem',
+              borderTop: '1px solid rgba(255, 255, 255, 0.14)',
+              fontSize: '0.76rem',
+              color: '#C7D2FE',
+              position: 'relative',
+              zIndex: 2
+            }}
+          >
+            Sandbox &amp; Official Live API modes stay completely separated.
+          </div>
+        </div>
+
+        {/* Right Form Panel */}
+        <div style={{ padding: '2.25rem 2.25rem', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.35rem', gap: '0.75rem', flexWrap: 'wrap' }}>
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="btn-secondary btn-sm"
+                style={{ borderRadius: '999px' }}
+              >
+                <ArrowLeft size={14} />
+                <span>Back</span>
+              </button>
+            )}
+
+            <div className="ss-tab-group">
+              <button
+                type="button"
+                className={`ss-tab ${isLogin ? 'active' : ''}`}
+                onClick={() => switchMode(true)}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                className={`ss-tab ${!isLogin ? 'active' : ''}`}
+                onClick={() => switchMode(false)}
+              >
+                Create Account
+              </button>
+            </div>
+          </div>
+
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '0.3rem' }}>
+            {isLogin ? 'Welcome back' : 'Create your workspace'}
+          </h1>
+          <p style={{ fontSize: '0.87rem', color: 'var(--text-secondary)', margin: '0 0 1.4rem 0' }}>
+            {isLogin
+              ? 'Sign in to access your scheduler, campaigns, and connected accounts.'
+              : 'Set up your SocialSync account in seconds.'}
+          </p>
+
+          {generalError && (
+            <div className="ss-alert ss-alert-danger" style={{ marginBottom: '1rem' }}>
+              <AlertCircle size={17} style={{ flexShrink: 0, marginTop: '2px' }} />
+              <span>{generalError}</span>
             </div>
           )}
 
-          <div className="form-group">
-            <label className="form-label">Email Address</label>
-            <div style={{ position: 'relative' }}>
-              <Mail size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '12px' }} />
-              <input
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="form-input"
-                style={{ paddingLeft: '2.4rem' }}
-              />
+          {infoMessage && (
+            <div className="ss-alert ss-alert-success" style={{ marginBottom: '1rem' }}>
+              <CheckCircle2 size={17} style={{ flexShrink: 0, marginTop: '2px' }} />
+              <span>{infoMessage}</span>
             </div>
-            {errors.email && <span className="form-error">{errors.email}</span>}
-          </div>
+          )}
 
-          <div className="form-group">
-            <label className="form-label">Password</label>
-            <div style={{ position: 'relative' }}>
-              <Lock size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '12px' }} />
-              <input
-                type={showPassword ? 'text' : 'password'}
-                placeholder="At least 6 characters"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="form-input"
-                style={{ paddingLeft: '2.4rem', paddingRight: '2.4rem' }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                style={{
-                  position: 'absolute',
-                  right: '10px',
-                  top: '9px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-muted)',
-                  cursor: 'pointer',
-                  padding: '2px'
-                }}
-                title={showPassword ? "Hide password" : "Show password"}
-              >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-            {errors.password && <span className="form-error">{errors.password}</span>}
-          </div>
-
-          {/* Remember Me & Forgot Password */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', cursor: 'pointer', color: 'var(--text-secondary)' }}>
-              <input 
-                type="checkbox" 
-                checked={rememberMe} 
-                onChange={(e) => setRememberMe(e.target.checked)} 
-                style={{ accentColor: 'var(--primary)' }}
-              />
-              <span>Remember Me</span>
-            </label>
-            {isLogin && (
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 600 }}
-              >
-                Forgot Password?
-              </button>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {!isLogin && (
+              <div className="form-group">
+                <label className="form-label" htmlFor="auth-name">Full Name</label>
+                <div style={{ position: 'relative' }}>
+                  <User size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                  <input
+                    id="auth-name"
+                    type="text"
+                    className="form-input"
+                    placeholder="Alex Rivera"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    style={{ paddingLeft: '2.35rem' }}
+                  />
+                </div>
+                {errors.name && <span className="form-error">{errors.name}</span>}
+              </div>
             )}
-          </div>
 
-          {/* Submit Button */}
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={loading}
-            style={{ width: '100%', padding: '0.75rem', fontSize: '0.95rem', marginTop: '0.25rem' }}
-          >
-            {loading ? 'Please wait...' : (isLogin ? 'Sign In' : 'Create Account')}
-            <ArrowRight size={16} />
-          </button>
-        </form>
+            <div className="form-group">
+              <label className="form-label" htmlFor="auth-email">Email Address</label>
+              <div style={{ position: 'relative' }}>
+                <Mail size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                <input
+                  id="auth-email"
+                  type="email"
+                  className="form-input"
+                  placeholder="you@domain.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  style={{ paddingLeft: '2.35rem' }}
+                />
+              </div>
+              {errors.email && <span className="form-error">{errors.email}</span>}
+            </div>
 
-        {/* Optional Dev-Only Demo Login (excluded from production builds) */}
-        {DEMO_LOGIN_ENABLED && (
-          <div style={{ marginTop: '1.25rem' }}>
-            <button
-              type="button"
-              onClick={handleQuickDemo}
+            <div className="form-group">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label className="form-label" htmlFor="auth-password">Password</label>
+                {isLogin && (
+                  <button
+                    type="button"
+                    onClick={handleForgotPassword}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--primary)',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: 0
+                    }}
+                  >
+                    Forgot password?
+                  </button>
+                )}
+              </div>
+              <div style={{ position: 'relative' }}>
+                <Lock size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                <input
+                  id="auth-password"
+                  type={showPassword ? 'text' : 'password'}
+                  className="form-input"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  style={{ paddingLeft: '2.35rem', paddingRight: '2.45rem' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  style={{
+                    position: 'absolute',
+                    right: '10px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '4px'
+                  }}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              {errors.password && <span className="form-error">{errors.password}</span>}
+            </div>
+
+            {isLogin && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  style={{ accentColor: 'var(--primary)' }}
+                />
+                <span>Keep me signed in on this browser</span>
+              </label>
+            )}
+
+            <button type="submit" disabled={loading} className="btn-primary" style={{ width: '100%', padding: '0.76rem 1.25rem', marginTop: '0.25rem' }}>
+              <span>{loading ? 'Please wait...' : isLogin ? 'Sign In' : 'Create Workspace'}</span>
+              {!loading && <ArrowRight size={16} />}
+            </button>
+          </form>
+
+          {DEMO_LOGIN_ENABLED && (
+            <div
               style={{
-                width: '100%',
-                padding: '0.75rem',
+                marginTop: '1.25rem',
+                padding: '0.85rem 1rem',
                 borderRadius: 'var(--radius-md)',
-                border: '1.5px dashed var(--primary)',
-                backgroundColor: 'var(--lavender)',
-                color: 'var(--primary)',
-                fontWeight: 700,
-                fontSize: '0.88rem',
+                background: 'var(--gradient-brand-soft)',
+                border: '1px solid var(--lavender-border)',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                gap: '0.5rem',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease'
+                justifyContent: 'space-between',
+                gap: '0.75rem'
               }}
             >
-              <Sparkles size={16} />
-              <span>Dev Demo Login</span>
-            </button>
-          </div>
-        )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                <Sparkles size={16} color="var(--primary)" />
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: 'var(--text-primary)' }}>Dev Quick Access</strong> available
+                </div>
+              </div>
+              <button type="button" onClick={handleQuickDemo} disabled={loading} className="btn-outline btn-sm">
+                Demo Sign In
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

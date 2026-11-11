@@ -18,8 +18,18 @@ import {
 import { api, isSafeHttpUrl } from '../services/api';
 
 const MONTH_NAMES = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December'
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December'
 ];
 
 function getStatusBadgeClass(status) {
@@ -36,47 +46,75 @@ function getStatusDotColor(status) {
   return 'var(--warning)';
 }
 
-function getPublishModeLabel(publishMode) {
-  return publishMode === 'live' ? 'LIVE API' : 'SANDBOX';
+function getPublishModeLabel(publishMode, appMode = 'demo') {
+  if (publishMode === 'live') return 'LIVE API';
+  if (publishMode === 'demo' || appMode === 'demo') return 'DEMO PUBLISHED';
+  return 'SANDBOX';
 }
 
-export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onNavigate }) {
-  const [filter, setFilter] = useState('all'); // 'all', 'scheduled', 'published', 'partial', 'failed', 'draft'
+export default function Calendar({ posts = [], appMode = 'demo', focusPost = null, onPostUpdated, onPostDeleted, onNavigate }) {
+  const isDemoMode = appMode === 'demo';
+  const [filter, setFilter] = useState('all');
 
-  const todayObj = new Date();
-  const todayYear = todayObj.getFullYear();
-  const todayMonth = todayObj.getMonth();
-  const todayDay = todayObj.getDate();
-
-  // Dynamic initialization to current real-time month, year and date
-  const [currentYear, setCurrentYear] = useState(todayYear);
-  const [currentMonth, setCurrentMonth] = useState(todayMonth);
-  const [selectedDate, setSelectedDate] = useState(() => {
-    return `${todayYear}-${String(todayMonth + 1).padStart(2, '0')}-${String(todayDay).padStart(2, '0')}`;
+  const [todayMeta] = useState(() => {
+    const now = new Date();
+    const rawFocus = focusPost?.scheduled_for || focusPost?.published_at || focusPost?.created_at || '';
+    let initYear = now.getFullYear();
+    let initMonth = now.getMonth();
+    let initDateStr = `${initYear}-${String(initMonth + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    if (/^\d{4}-\d{2}-\d{2}/.test(rawFocus)) {
+      const [yStr, mStr, dStr] = rawFocus.slice(0, 10).split('-');
+      const fy = Number(yStr);
+      const fm = Number(mStr) - 1;
+      if (!Number.isNaN(fy) && !Number.isNaN(fm) && fm >= 0 && fm <= 11) {
+        initYear = fy;
+        initMonth = fm;
+        initDateStr = `${yStr}-${mStr}-${dStr}`;
+      }
+    }
+    return {
+      year: now.getFullYear(),
+      month: now.getMonth(),
+      day: now.getDate(),
+      initYear,
+      initMonth,
+      initDateStr
+    };
   });
 
-  // Modals state
-  const [viewingPost, setViewingPost] = useState(null);
+  const { year: todayYear, month: todayMonth, day: todayDay, initYear, initMonth, initDateStr } = todayMeta;
+
+  const [currentYear, setCurrentYear] = useState(initYear);
+  const [currentMonth, setCurrentMonth] = useState(initMonth);
+  const [selectedDate, setSelectedDate] = useState(initDateStr);
+
+  const [viewingPost, setViewingPost] = useState(() => focusPost || null);
   const [editingPost, setEditingPost] = useState(null);
   const [editContent, setEditContent] = useState('');
   const [editStatus, setEditStatus] = useState('scheduled');
-  const [editPublishMode, setEditPublishMode] = useState('sandbox');
+  const [editPublishMode, setEditPublishMode] = useState(isDemoMode ? 'demo' : 'live');
   const [editDate, setEditDate] = useState('');
   const [editErrorMsg, setEditErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState(null);
 
-  // Status explanations for beginners
-  const statusDescriptions = {
-    all: 'Showing all content across your calendar: scheduled, published, partial, failed, and draft posts.',
-    scheduled: 'Scheduled: Posts queued to automatically release at their designated date and time (Live or Sandbox).',
-    published: 'Published: Content completed either via Live Official APIs or Sandbox Simulation (see mode pill).',
-    partial: 'Partial: Live post succeeded on one or more channels but failed on at least one channel.',
-    failed: 'Failed: Live publishing failed with an API or OAuth validation error. Inspect details to fix & retry.',
-    draft: 'Drafts: Ideas and work-in-progress posts saved for future refinement.'
+  const showTempFeedback = (type, text) => {
+    setFeedback({ type, text });
+    setTimeout(() => setFeedback(null), 4000);
   };
 
-  const filteredPosts = posts.filter(p => {
+  const statusDescriptions = {
+    all: `Showing all ${isDemoMode ? 'Demo workspace' : 'Live Server'} content across your calendar: scheduled, published, partial, failed, and draft posts.`,
+    scheduled: `Scheduled: Posts queued to automatically release at their designated timestamp (${isDemoMode ? 'Demo Simulation' : 'Live Server SQLite'}).`,
+    published: isDemoMode
+      ? 'Demo Published: Simulated publishes stored in Demo SQLite workspace (not posted externally).'
+      : 'Published: Posts recorded in Live Server workspace.',
+    partial: 'Partial: Live post succeeded on one or more channels but failed on at least one channel.',
+    failed: 'Failed: Publishing failed (e.g., OAuth Setup Required). Inspect details to fix & retry.',
+    draft: 'Drafts: Concepts and work-in-progress captions saved for future refinement.'
+  };
+
+  const filteredPosts = posts.filter((p) => {
     if (filter === 'all') return true;
     return p.status === filter;
   });
@@ -84,18 +122,18 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
   const handlePrevMonth = () => {
     if (currentMonth === 0) {
       setCurrentMonth(11);
-      setCurrentYear(y => y - 1);
+      setCurrentYear((y) => y - 1);
     } else {
-      setCurrentMonth(m => m - 1);
+      setCurrentMonth((m) => m - 1);
     }
   };
 
   const handleNextMonth = () => {
     if (currentMonth === 11) {
       setCurrentMonth(0);
-      setCurrentYear(y => y + 1);
+      setCurrentYear((y) => y + 1);
     } else {
-      setCurrentMonth(m => m + 1);
+      setCurrentMonth((m) => m + 1);
     }
   };
 
@@ -107,8 +145,12 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     setEditingPost(post);
     setEditContent(post.content);
     setEditStatus(post.status);
-    setEditPublishMode(post.publish_mode === 'live' ? 'live' : 'sandbox');
-    setEditDate(post.scheduled_for ? post.scheduled_for.replace(' ', 'T').substring(0, 16) : '');
+    setEditPublishMode(isDemoMode ? 'demo' : post.publish_mode === 'live' ? 'live' : 'sandbox');
+    setEditDate(
+      post.scheduled_for
+        ? post.scheduled_for.replace(' ', 'T').substring(0, 16)
+        : `${selectedDate}T12:00`
+    );
     setEditErrorMsg('');
   };
 
@@ -119,20 +161,37 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     setLoading(true);
     setEditErrorMsg('');
     try {
-      const updated = await api.updatePost(editingPost.id, {
-        content: editContent,
-        status: editStatus,
-        publish_mode: editPublishMode,
-        scheduled_for: editDate ? editDate.replace('T', ' ') + ':00' : null
-      });
-      if (onPostUpdated) onPostUpdated(updated);
-      setEditingPost(null);
-      setFeedback(
-        updated.status === 'partial'
-          ? `Post partially published (${updated.publish_mode?.toUpperCase()}): ${updated.error_message || 'Check View modal for channel details.'}`
-          : 'Post updated successfully!'
+      const effectiveMode = isDemoMode ? 'demo' : editPublishMode;
+      const updated = await api.updatePost(
+        editingPost.id,
+        {
+          content: editContent,
+          status: editStatus,
+          publish_mode: effectiveMode,
+          scheduled_for: editDate ? editDate.replace('T', ' ') + ':00' : null
+        },
+        appMode
       );
-      setTimeout(() => setFeedback(null), 4000);
+      if (onPostUpdated) onPostUpdated(updated);
+      if (editDate && /^\d{4}-\d{2}-\d{2}/.test(editDate)) {
+        const [ny, nm] = editDate.slice(0, 10).split('-').map(Number);
+        setSelectedDate(editDate.slice(0, 10));
+        if (!Number.isNaN(ny) && !Number.isNaN(nm) && nm >= 1 && nm <= 12) {
+          setCurrentYear(ny);
+          setCurrentMonth(nm - 1);
+        }
+      }
+      setEditingPost(null);
+      if (updated.status === 'published' && (updated.publish_mode === 'demo' || isDemoMode)) {
+        showTempFeedback('success', 'Post Demo Published cleanly inside Demo Mode workspace!');
+      } else if (updated.status === 'partial') {
+        showTempFeedback(
+          'error',
+          `Post partially published: ${updated.error_message || 'Check View modal for channel details.'}`
+        );
+      } else {
+        showTempFeedback('success', 'Post updated cleanly!');
+      }
     } catch (err) {
       console.error(err);
       if (err.data?.id && onPostUpdated) {
@@ -144,43 +203,60 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     }
   };
 
+  const handleQuickDemoPublish = async (post) => {
+    if (!post || !isDemoMode) return;
+    setLoading(true);
+    try {
+      const updated = await api.updatePost(
+        post.id,
+        {
+          content: post.content,
+          status: 'published',
+          publish_mode: 'demo'
+        },
+        appMode
+      );
+      if (onPostUpdated) onPostUpdated(updated);
+      setViewingPost(updated);
+      showTempFeedback('success', 'Post Demo Published cleanly inside Demo Mode workspace!');
+    } catch (err) {
+      console.error(err);
+      showTempFeedback('error', err.message || 'Failed to Demo Publish post.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDelete = async (postId) => {
     if (window.confirm('Are you sure you want to delete this post? This action cannot be undone.')) {
       try {
-        await api.deletePost(postId);
+        await api.deletePost(postId, appMode);
         if (onPostDeleted) onPostDeleted(postId);
         if (viewingPost?.id === postId) setViewingPost(null);
-        setFeedback('Post deleted successfully.');
-        setTimeout(() => setFeedback(null), 3000);
+        showTempFeedback('success', 'Post deleted cleanly.');
       } catch (err) {
         console.error(err);
-        alert('Failed to delete post.');
+        showTempFeedback('error', err?.message || 'Failed to delete post.');
       }
     }
   };
 
-  // Month navigation calculations
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
   const firstDayIndex = new Date(currentYear, currentMonth, 1).getDay();
 
-  // Helper to get posts for any specific date string "YYYY-MM-DD"
-  const getPostsForDateString = (dateStr) => {
-    return filteredPosts.filter(p => {
+  const getPostsForDateString = (dateStr) =>
+    filteredPosts.filter((p) => {
       const check = p.scheduled_for || p.created_at;
       return check && check.startsWith(dateStr);
     });
-  };
 
-  // Helper to get posts for day of current month
   const getPostsForDay = (day) => {
     const dayStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     return getPostsForDateString(dayStr);
   };
 
-  // Posts for currently selected date
   const selectedDatePosts = getPostsForDateString(selectedDate);
 
-  // Format selected date nicely for human display
   const formatSelectedDateHuman = (dateStr) => {
     try {
       const [y, m, d] = dateStr.split('-').map(Number);
@@ -196,210 +272,167 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
     }
   };
 
+  const statusTabs = [
+    { id: 'all', label: 'All', count: posts.length },
+    { id: 'scheduled', label: 'Scheduled', count: posts.filter((p) => p.status === 'scheduled').length },
+    { id: 'published', label: 'Published', count: posts.filter((p) => p.status === 'published').length },
+    { id: 'partial', label: 'Partial', count: posts.filter((p) => p.status === 'partial').length },
+    { id: 'failed', label: 'Failed', count: posts.filter((p) => p.status === 'failed').length },
+    { id: 'draft', label: 'Drafts', count: posts.filter((p) => p.status === 'draft').length }
+  ];
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem', width: '100%' }} className="animate-fade-in">
-      {/* Top Filter Bar */}
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: '1rem'
-      }}>
-        {/* Filter Pills with Real Counts */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-          {[
-            { id: 'all', label: 'All Content', count: posts.length },
-            { id: 'scheduled', label: 'Scheduled', count: posts.filter(p => p.status === 'scheduled').length },
-            { id: 'published', label: 'Published', count: posts.filter(p => p.status === 'published').length },
-            { id: 'partial', label: 'Partial', count: posts.filter(p => p.status === 'partial').length },
-            { id: 'failed', label: 'Failed', count: posts.filter(p => p.status === 'failed').length },
-            { id: 'draft', label: 'Drafts', count: posts.filter(p => p.status === 'draft').length },
-          ].map(tab => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }} className="animate-fade-in">
+      {/* Top Action & Filter Header */}
+      <div className="ss-page-header">
+        <div className="ss-tab-group">
+          {statusTabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setFilter(tab.id)}
-              style={{
-                padding: '0.45rem 1rem',
-                borderRadius: 'var(--radius-full)',
-                border: filter === tab.id ? '2px solid var(--primary)' : '1px solid var(--border-light)',
-                backgroundColor: filter === tab.id ? 'var(--lavender)' : 'var(--bg-surface)',
-                color: filter === tab.id ? 'var(--primary)' : 'var(--text-secondary)',
-                fontWeight: 700,
-                fontSize: '0.84rem',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                transition: 'all 0.15s ease'
-              }}
+              className={`ss-tab ${filter === tab.id ? 'active' : ''}`}
             >
               <span>{tab.label}</span>
-              <span style={{
-                backgroundColor: filter === tab.id ? 'var(--primary)' : 'var(--bg-muted)',
-                color: filter === tab.id ? '#FFFFFF' : 'var(--text-muted)',
-                borderRadius: 'var(--radius-full)',
-                padding: '1px 7px',
-                fontSize: '0.72rem',
-                fontWeight: 700
-              }}>
+              <span
+                style={{
+                  backgroundColor: filter === tab.id ? 'var(--primary)' : 'var(--bg-surface)',
+                  color: filter === tab.id ? '#FFFFFF' : 'var(--text-secondary)',
+                  borderRadius: '999px',
+                  padding: '0.06rem 0.44rem',
+                  fontSize: '0.7rem',
+                  fontWeight: 700
+                }}
+              >
                 {tab.count}
               </span>
             </button>
           ))}
         </div>
 
-        {/* Schedule Post Action Button */}
-        <button
-          onClick={() => onNavigate('compose')}
-          className="btn-primary"
-          style={{ padding: '0.55rem 1.25rem', fontSize: '0.86rem' }}
-        >
-          <Plus size={16} />
+        <button onClick={() => onNavigate('compose')} className="btn-primary">
+          <Plus size={15} />
           <span>Schedule Post</span>
         </button>
       </div>
 
-      {/* Helpful Context Callout */}
+      {/* Info Banner */}
       <div className="help-box">
         <Info size={18} color="var(--primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
-        <span>{statusDescriptions[filter]} Click any calendar date to view its scheduled queue on the right.</span>
+        <span>
+          {statusDescriptions[filter]} Click any date cell to inspect that day's queue.
+        </span>
       </div>
 
-      {/* Action Feedback alert */}
       {feedback && (
-        <div style={{
-          backgroundColor: 'var(--success-bg)',
-          color: 'var(--success)',
-          padding: '0.75rem 1rem',
-          borderRadius: 'var(--radius-md)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          fontSize: '0.88rem',
-          fontWeight: 600
-        }}>
-          <CheckCircle2 size={16} />
-          <span>{feedback}</span>
+        <div
+          className={`ss-alert ${feedback?.type === 'error' ? 'ss-alert-danger' : 'ss-alert-success'}`}
+          style={{ fontWeight: 600 }}
+        >
+          {feedback?.type === 'error' ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+          <span>{typeof feedback === 'string' ? feedback : feedback.text}</span>
         </div>
       )}
 
-      {/* BALANCED 2-COLUMN LAYOUT: Compact Calendar Left, Selected-Date Agenda Right */}
-      <div className="calendar-grid-layout" style={{
-        display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 0.95fr)',
-        gap: '1.5rem',
-        alignItems: 'start'
-      }}>
-        {/* LEFT COLUMN: Compact Monthly Calendar */}
-        <div className="clean-card" style={{ padding: '1.25rem' }}>
-          {/* Month Navigation Header */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: '1rem',
-            paddingBottom: '0.75rem',
-            borderBottom: '1px solid var(--border-light)'
-          }}>
-            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
+      {/* 2-Column Interactive Calendar + Day Agenda */}
+      <div className="calendar-grid-layout">
+        {/* Left: Monthly Calendar */}
+        <div className="clean-card" style={{ padding: '1.35rem' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: '1rem',
+              paddingBottom: '0.8rem',
+              borderBottom: '1px solid var(--border-light)'
+            }}
+          >
+            <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0 }}>
               {MONTH_NAMES[currentMonth]} {currentYear}
             </h3>
+
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <button
-                onClick={handlePrevMonth}
-                className="btn-secondary"
-                style={{ padding: '0.35rem 0.6rem' }}
-                title="Previous Month"
-              >
-                <ChevronLeft size={16} />
+              <button onClick={handlePrevMonth} className="btn-secondary btn-sm" title="Previous Month" aria-label="Previous Month">
+                <ChevronLeft size={15} />
               </button>
               <button
                 onClick={() => {
                   const now = new Date();
                   setCurrentMonth(now.getMonth());
                   setCurrentYear(now.getFullYear());
-                  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-                  setSelectedDate(dateStr);
+                  setSelectedDate(
+                    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+                  );
                 }}
-                className="btn-secondary"
-                style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', fontWeight: 600 }}
+                className="btn-secondary btn-sm"
               >
                 Today
               </button>
-              <button
-                onClick={handleNextMonth}
-                className="btn-secondary"
-                style={{ padding: '0.35rem 0.6rem' }}
-                title="Next Month"
-              >
-                <ChevronRight size={16} />
+              <button onClick={handleNextMonth} className="btn-secondary btn-sm" title="Next Month" aria-label="Next Month">
+                <ChevronRight size={15} />
               </button>
             </div>
           </div>
 
-          {/* Weekday Names Header */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(7, 1fr)',
-            textAlign: 'center',
-            fontWeight: 700,
-            fontSize: '0.75rem',
-            color: 'var(--text-muted)',
-            marginBottom: '0.5rem',
-            textTransform: 'uppercase',
-            letterSpacing: '0.04em'
-          }}>
-            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
-              <div key={d} style={{ padding: '0.35rem 0' }}>{d}</div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(7, 1fr)',
+              textAlign: 'center',
+              fontWeight: 700,
+              fontSize: '0.73rem',
+              color: 'var(--text-muted)',
+              marginBottom: '0.45rem',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em'
+            }}
+          >
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+              <div key={d} style={{ padding: '0.35rem 0' }}>
+                {d}
+              </div>
             ))}
           </div>
 
-          {/* Compact Calendar Grid */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(7, 1fr)',
-            gap: '4px'
-          }}>
-                {/* Empty slots before first day */}
-                {Array.from({ length: firstDayIndex }).map((_, i) => (
-                  <div 
-                    key={`empty-${i}`} 
-                    style={{ 
-                      height: '56px', 
-                      backgroundColor: 'var(--bg-muted)', 
-                      borderRadius: 'var(--radius-sm)',
-                      opacity: 0.25 
-                    }} 
-                  />
-                ))}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '6px' }}>
+            {Array.from({ length: firstDayIndex }).map((_, i) => (
+              <div
+                key={`empty-${i}`}
+                style={{
+                  height: '62px',
+                  backgroundColor: 'var(--bg-muted)',
+                  borderRadius: '10px',
+                  opacity: 0.35
+                }}
+              />
+            ))}
 
-                {/* Actual Days of the Month */}
-                {Array.from({ length: daysInMonth }).map((_, i) => {
-                  const day = i + 1;
-                  const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                  const dayPosts = getPostsForDay(day);
-                  const isToday = currentMonth === todayMonth && currentYear === todayYear && day === todayDay;
-                  const isSelected = selectedDate === dateStr;
+            {Array.from({ length: daysInMonth }).map((_, i) => {
+              const day = i + 1;
+              const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+              const dayPosts = getPostsForDay(day);
+              const isToday = currentMonth === todayMonth && currentYear === todayYear && day === todayDay;
+              const isSelected = selectedDate === dateStr;
 
-                  return (
-                    <div
-                      key={`day-${day}`}
-                      onClick={() => setSelectedDate(dateStr)}
+              return (
+                <div
+                  key={`day-${day}`}
+                  onClick={() => setSelectedDate(dateStr)}
+                  title={`${dateStr} — ${dayPosts.length} post(s)`}
                   style={{
-                    height: '56px',
-                    backgroundColor: isSelected 
-                      ? 'var(--lavender)' 
-                      : isToday 
-                        ? 'rgba(108, 92, 231, 0.08)' 
+                    height: '62px',
+                    backgroundColor: isSelected
+                      ? 'var(--lavender)'
+                      : isToday
+                        ? 'rgba(99, 91, 255, 0.06)'
                         : 'var(--bg-surface)',
-                    border: isSelected 
-                      ? '2px solid var(--primary)' 
-                      : isToday 
-                        ? '1.5px solid var(--primary)' 
-                        : '1px solid var(--border-light)',
-                    borderRadius: 'var(--radius-sm)',
-                    padding: '4px 6px',
+                    border: isSelected
+                      ? '2px solid var(--primary)'
+                      : isToday
+                        ? '1.5px solid var(--lavender-border)'
+                        : '1px solid var(--border-color)',
+                    borderRadius: '10px',
+                    padding: '6px 7px',
                     cursor: 'pointer',
                     display: 'flex',
                     flexDirection: 'column',
@@ -407,40 +440,33 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                     transition: 'all 0.15s ease',
                     boxShadow: isSelected ? 'var(--shadow-sm)' : 'none'
                   }}
-                  title={`${dateStr} — ${dayPosts.length} post(s)`}
                 >
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between'
-                  }}>
-                    <span style={{
-                      fontSize: '0.78rem',
-                      fontWeight: isSelected || isToday ? 800 : 600,
-                      color: isSelected 
-                        ? 'var(--primary)' 
-                        : isToday 
-                          ? 'var(--primary)' 
-                          : 'var(--text-primary)'
-                    }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span
+                      style={{
+                        fontSize: '0.8rem',
+                        fontWeight: isSelected || isToday ? 800 : 600,
+                        color: isSelected || isToday ? 'var(--primary)' : 'var(--text-primary)'
+                      }}
+                    >
                       {day}
                     </span>
                     {isToday && (
-                      <span style={{
-                        fontSize: '0.58rem',
-                        fontWeight: 700,
-                        color: 'var(--primary)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.02em'
-                      }}>
+                      <span
+                        style={{
+                          fontSize: '0.58rem',
+                          fontWeight: 700,
+                          color: 'var(--primary)',
+                          textTransform: 'uppercase'
+                        }}
+                      >
                         Today
                       </span>
                     )}
                   </div>
 
-                  {/* Indicator Dots / Mini Badge */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexWrap: 'wrap' }}>
-                    {dayPosts.slice(0, 3).map((p, pIdx) => (
+                    {dayPosts.slice(0, 4).map((p, pIdx) => (
                       <span
                         key={pIdx}
                         style={{
@@ -452,9 +478,9 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                         }}
                       />
                     ))}
-                    {dayPosts.length > 3 && (
+                    {dayPosts.length > 4 && (
                       <span style={{ fontSize: '0.62rem', fontWeight: 700, color: 'var(--text-muted)' }}>
-                        +{dayPosts.length - 3}
+                        +{dayPosts.length - 4}
                       </span>
                     )}
                   </div>
@@ -462,66 +488,72 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
               );
             })}
           </div>
+
+          {/* Color Legend */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', marginTop: '1rem', paddingTop: '0.8rem', borderTop: '1px solid var(--border-light)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+            {[
+              { label: 'Scheduled', color: 'var(--primary)' },
+              { label: 'Published', color: 'var(--success)' },
+              { label: 'Draft / Partial', color: 'var(--warning)' },
+              { label: 'Failed', color: 'var(--danger)' }
+            ].map((item) => (
+              <span key={item.label} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: item.color }} />
+                {item.label}
+              </span>
+            ))}
+          </div>
         </div>
 
-        {/* RIGHT COLUMN: Selected-Date Agenda */}
-        <div className="clean-card" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            paddingBottom: '0.75rem',
-            borderBottom: '1px solid var(--border-light)'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <CalendarDays size={18} color="var(--primary)" />
+        {/* Right: Selected-Date Queue */}
+        <div className="clean-card" style={{ padding: '1.35rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingBottom: '0.8rem',
+              borderBottom: '1px solid var(--border-light)',
+              gap: '0.5rem'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <div className="ss-icon-badge" style={{ width: '36px', height: '36px', backgroundColor: 'var(--lavender)', color: 'var(--primary)' }}>
+                <CalendarDays size={17} />
+              </div>
               <div>
-                <h4 style={{ fontSize: '0.98rem', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
+                <h4 style={{ fontSize: '0.96rem', fontWeight: 700, margin: 0 }}>
                   {formatSelectedDateHuman(selectedDate)}
                 </h4>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                  {selectedDatePosts.length} post{selectedDatePosts.length === 1 ? '' : 's'} on this date
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                  {selectedDatePosts.length} post{selectedDatePosts.length === 1 ? '' : 's'} queued
                 </span>
               </div>
             </div>
 
-            <button
-              onClick={() => onNavigate('compose')}
-              className="btn-secondary"
-              style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
-            >
+            <button onClick={() => onNavigate('compose', selectedDate)} className="btn-secondary btn-sm">
               <Plus size={14} />
               <span>Add Post</span>
             </button>
           </div>
 
-          {/* Agenda Items List */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
             {selectedDatePosts.length === 0 ? (
-              <div style={{
-                textAlign: 'center',
-                padding: '2.5rem 1rem',
-                backgroundColor: 'var(--bg-muted)',
-                borderRadius: 'var(--radius-md)'
-              }}>
-                <Clock size={28} color="var(--text-muted)" style={{ margin: '0 auto 0.75rem auto', opacity: 0.7 }} />
-                <div style={{ fontWeight: 700, fontSize: '0.92rem', color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
-                  No posts scheduled for this date
+              <div className="empty-state" style={{ padding: '2rem 1rem', backgroundColor: 'var(--bg-muted)', borderRadius: '14px' }}>
+                <div className="empty-state-icon" style={{ width: '44px', height: '44px' }}>
+                  <Clock size={20} />
                 </div>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 1rem 0' }}>
-                  Plan ahead and maintain an active social presence by scheduling content for this day.
-                </p>
-                <button
-                  onClick={() => onNavigate('compose')}
-                  className="btn-primary"
-                  style={{ padding: '0.45rem 1rem', fontSize: '0.82rem' }}
-                >
+                <div className="empty-state-title">No posts on this date</div>
+                <div className="empty-state-desc">
+                  Schedule content for {formatSelectedDateHuman(selectedDate)} to keep your pipeline full.
+                </div>
+                <button onClick={() => onNavigate('compose', selectedDate)} className="btn-primary btn-sm">
                   <Plus size={14} />
                   <span>Schedule Content</span>
                 </button>
               </div>
             ) : (
-              selectedDatePosts.map(post => {
+              selectedDatePosts.map((post) => {
                 const platforms = Array.isArray(post.platforms) ? post.platforms : [post.platforms];
                 const timeString = post.scheduled_for ? post.scheduled_for.split(' ')[1]?.substring(0, 5) : 'Anytime';
 
@@ -529,91 +561,64 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                   <div
                     key={post.id}
                     style={{
-                      border: '1px solid var(--border-light)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: '1rem',
-                      backgroundColor: 'var(--bg-surface)',
+                      border: '1px solid var(--border-color)',
+                      borderRadius: '12px',
+                      padding: '0.95rem',
+                      backgroundColor: 'var(--bg-muted)',
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: '0.65rem'
+                      gap: '0.6rem'
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.68rem', padding: '2px 7px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.45rem', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.66rem' }}>
                           {post.status.toUpperCase()}
                         </span>
-                        <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.64rem', padding: '2px 6px' }}>
-                          {getPublishModeLabel(post.publish_mode)}
+                        <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.64rem' }}>
+                          {getPublishModeLabel(post.publish_mode, appMode)}
                         </span>
-                        {platforms.map((pl, idx) => (
-                          <span key={idx} className="badge badge-neutral" style={{ fontSize: '0.68rem', padding: '2px 6px' }}>
+                        {platforms.filter(Boolean).map((pl, idx) => (
+                          <span key={idx} className="badge badge-primary" style={{ fontSize: '0.66rem' }}>
                             {pl}
                           </span>
                         ))}
                       </div>
 
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                        <Clock size={12} />
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                        <Clock size={12} color="var(--primary)" />
                         {timeString}
                       </span>
                     </div>
 
-                    <p style={{
-                      fontSize: '0.86rem',
-                      color: 'var(--text-primary)',
-                      margin: 0,
-                      lineHeight: 1.45,
-                      display: '-webkit-box',
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden'
-                    }}>
+                    <p
+                      style={{
+                        fontSize: '0.85rem',
+                        color: 'var(--text-primary)',
+                        margin: 0,
+                        lineHeight: 1.48,
+                        display: '-webkit-box',
+                        WebkitLineClamp: 3,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden'
+                      }}
+                    >
                       {post.content}
                     </p>
 
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'flex-end',
-                      gap: '0.45rem',
-                      paddingTop: '0.5rem',
-                      borderTop: '1px solid var(--border-light)'
-                    }}>
-                      <button
-                        onClick={() => handleOpenView(post)}
-                        className="btn-secondary"
-                        style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
-                        title="View Full Post"
-                      >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.45rem', paddingTop: '0.45rem', borderTop: '1px solid var(--border-light)' }}>
+                      <button onClick={() => handleOpenView(post)} className="btn-secondary btn-sm">
                         <Eye size={13} />
                         <span>View</span>
                       </button>
-                      <button
-                        onClick={() => handleOpenEdit(post)}
-                        className="btn-secondary"
-                        style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
-                        title="Edit Post"
-                      >
+                      <button onClick={() => handleOpenEdit(post)} className="btn-secondary btn-sm">
                         <Edit3 size={13} />
                         <span>Edit</span>
                       </button>
                       <button
                         onClick={() => handleDelete(post.id)}
-                        style={{
-                          backgroundColor: 'var(--danger-bg)',
-                          border: 'none',
-                          color: 'var(--danger)',
-                          padding: '0.35rem 0.65rem',
-                          borderRadius: 'var(--radius-md)',
-                          fontSize: '0.75rem',
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '3px'
-                        }}
-                        title="Delete Post"
+                        className="btn-secondary btn-sm"
+                        style={{ backgroundColor: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
                       >
                         <Trash2 size={13} />
                         <span>Delete</span>
@@ -627,39 +632,43 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
         </div>
       </div>
 
-      {/* COMPREHENSIVE AGENDA OVERVIEW SECTION BELOW CALENDAR */}
-      <div className="clean-card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: '0.75rem',
-          paddingBottom: '0.75rem',
-          borderBottom: '1px solid var(--border-light)'
-        }}>
+      {/* Full Content Agenda Section */}
+      <div className="clean-card" style={{ padding: '1.45rem', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            paddingBottom: '0.8rem',
+            borderBottom: '1px solid var(--border-light)'
+          }}
+        >
           <div>
-            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
-              Complete Content Agenda
-            </h3>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '0.2rem 0 0 0' }}>
-              Full chronological list of all scheduled posts, live releases, and draft concepts.
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0 }}>Complete Content Agenda</h3>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0.2rem 0 0 0' }}>
+              All filtered posts arranged for quick inspection, editing, and cleanup.
             </p>
           </div>
-          <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+          <span className="badge badge-primary">
             Showing {filteredPosts.length} item{filteredPosts.length === 1 ? '' : 's'}
           </span>
         </div>
 
         {filteredPosts.length === 0 ? (
           <div className="empty-state" style={{ padding: '2rem 1rem' }}>
-            <CalendarIcon size={24} />
+            <div className="empty-state-icon">
+              <CalendarIcon size={22} />
+            </div>
             <div className="empty-state-title">No content matches "{filter}"</div>
-            <div className="empty-state-desc">Try selecting "All Content" or create a new post to get started.</div>
+            <div className="empty-state-desc">
+              Switch back to "All" or create a new post inside Compose Studio.
+            </div>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
-            {filteredPosts.map(post => {
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 320px), 1fr))', gap: '1rem' }}>
+            {filteredPosts.map((post) => {
               const platforms = Array.isArray(post.platforms) ? post.platforms : [post.platforms];
               const dateDisplay = post.scheduled_for || post.created_at || 'Undated';
 
@@ -668,85 +677,68 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                   key={post.id}
                   style={{
                     backgroundColor: 'var(--bg-muted)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: '1.15rem',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '14px',
+                    padding: '1.05rem',
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'space-between',
-                    gap: '0.85rem'
+                    gap: '0.8rem'
                   }}
                 >
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem', gap: '0.35rem', flexWrap: 'wrap' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.7rem' }}>
+                        <span className={`badge ${getStatusBadgeClass(post.status)}`} style={{ fontSize: '0.67rem' }}>
                           {post.status.toUpperCase()}
                         </span>
                         <span className={`badge ${post.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '0.64rem' }}>
-                          {getPublishModeLabel(post.publish_mode)}
+                          {getPublishModeLabel(post.publish_mode, appMode)}
                         </span>
                       </div>
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Clock size={12} />
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Clock size={12} color="var(--primary)" />
                         {dateDisplay}
                       </span>
                     </div>
 
-                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
-                      {platforms.map((pl, idx) => (
-                        <span key={idx} className="badge badge-neutral" style={{ fontSize: '0.68rem', padding: '2px 6px' }}>
+                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.55rem', flexWrap: 'wrap' }}>
+                      {platforms.filter(Boolean).map((pl, idx) => (
+                        <span key={idx} className="badge badge-primary" style={{ fontSize: '0.66rem' }}>
                           {pl}
                         </span>
                       ))}
                     </div>
 
-                    <p style={{
-                      fontSize: '0.88rem',
-                      color: 'var(--text-primary)',
-                      lineHeight: 1.45,
-                      margin: 0,
-                      display: '-webkit-box',
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden'
-                    }}>
+                    <p
+                      style={{
+                        fontSize: '0.86rem',
+                        color: 'var(--text-primary)',
+                        lineHeight: 1.48,
+                        margin: 0,
+                        display: '-webkit-box',
+                        WebkitLineClamp: 3,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden'
+                      }}
+                    >
                       {post.content}
                     </p>
                   </div>
 
-                  {/* Actions */}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-light)' }}>
-                    <button
-                      onClick={() => handleOpenView(post)}
-                      className="btn-secondary"
-                      style={{ padding: '0.35rem 0.65rem', fontSize: '0.78rem' }}
-                    >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.45rem', paddingTop: '0.55rem', borderTop: '1px solid var(--border-light)' }}>
+                    <button onClick={() => handleOpenView(post)} className="btn-secondary btn-sm">
                       <Eye size={13} />
                       <span>View</span>
                     </button>
-                    <button
-                      onClick={() => handleOpenEdit(post)}
-                      className="btn-secondary"
-                      style={{ padding: '0.35rem 0.65rem', fontSize: '0.78rem' }}
-                    >
+                    <button onClick={() => handleOpenEdit(post)} className="btn-secondary btn-sm">
                       <Edit3 size={13} />
                       <span>Edit</span>
                     </button>
                     <button
                       onClick={() => handleDelete(post.id)}
-                      style={{
-                        backgroundColor: 'var(--danger-bg)',
-                        border: 'none',
-                        color: 'var(--danger)',
-                        padding: '0.35rem 0.65rem',
-                        borderRadius: 'var(--radius-md)',
-                        fontSize: '0.78rem',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '3px'
-                      }}
+                      className="btn-secondary btn-sm"
+                      style={{ backgroundColor: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
                     >
                       <Trash2 size={13} />
                       <span>Delete</span>
@@ -761,51 +753,31 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
 
       {/* VIEW POST MODAL */}
       {viewingPost && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.65)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 100,
-          padding: '1rem'
-        }}>
-          <div 
-            className="clean-card"
-            style={{
-              width: '100%',
-              maxWidth: '520px',
-              backgroundColor: 'var(--bg-surface)',
-              maxHeight: '90vh',
-              overflowY: 'auto'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Eye size={18} color="var(--primary)" />
-                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Post Preview</h3>
+        <div className="ss-modal-backdrop" onClick={() => setViewingPost(null)}>
+          <div className="ss-modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                <div className="ss-icon-badge" style={{ width: '34px', height: '34px', backgroundColor: 'var(--lavender)', color: 'var(--primary)' }}>
+                  <Eye size={16} />
+                </div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Post Details</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setViewingPost(null)}
-                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                style={{ background: 'var(--bg-muted)', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', width: '30px', height: '30px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
-                <X size={20} />
+                <X size={16} />
               </button>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.05rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
                   <span className={`badge ${getStatusBadgeClass(viewingPost.status)}`}>
                     {viewingPost.status.toUpperCase()}
                   </span>
                   <span className={`badge ${viewingPost.publish_mode === 'live' ? 'badge-success' : 'badge-neutral'}`}>
-                    {getPublishModeLabel(viewingPost.publish_mode)}
+                    {getPublishModeLabel(viewingPost.publish_mode, appMode)}
                   </span>
                   {viewingPost.media_type && viewingPost.media_type !== 'none' && (
                     <span className="badge badge-neutral" style={{ textTransform: 'uppercase' }}>
@@ -813,29 +785,27 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                     </span>
                   )}
                 </div>
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <Clock size={14} />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Clock size={14} color="var(--primary)" />
                   {viewingPost.scheduled_for || viewingPost.published_at || viewingPost.created_at || 'Not scheduled'}
                 </span>
               </div>
 
-              {/* Target Platforms */}
               <div>
-                <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '5px' }}>
                   Target Platforms:
                 </span>
                 <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                  {(Array.isArray(viewingPost.platforms) ? viewingPost.platforms : [viewingPost.platforms]).map((pl, idx) => (
-                    <span key={idx} className="badge badge-neutral" style={{ fontSize: '0.78rem' }}>
+                  {(Array.isArray(viewingPost.platforms) ? viewingPost.platforms : [viewingPost.platforms]).filter(Boolean).map((pl, idx) => (
+                    <span key={idx} className="badge badge-primary">
                       {pl}
                     </span>
                   ))}
                 </div>
               </div>
 
-              {/* Media Preview */}
               {isSafeHttpUrl(viewingPost.media_url, true) && (
-                <div style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden', maxHeight: '240px', backgroundColor: '#000' }}>
+                <div style={{ borderRadius: '12px', overflow: 'hidden', maxHeight: '240px', backgroundColor: '#000' }}>
                   {viewingPost.media_type === 'video' ? (
                     <video src={viewingPost.media_url} controls style={{ width: '100%', maxHeight: '240px', display: 'block' }} />
                   ) : (
@@ -844,43 +814,34 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                 </div>
               )}
 
-              {/* Post Content Box */}
-              <div style={{
-                backgroundColor: 'var(--bg-muted)',
-                padding: '1.15rem',
-                borderRadius: 'var(--radius-md)',
-                fontSize: '0.94rem',
-                lineHeight: 1.6,
-                color: 'var(--text-primary)',
-                whiteSpace: 'pre-wrap'
-              }}>
+              <div
+                style={{
+                  backgroundColor: 'var(--bg-muted)',
+                  border: '1px solid var(--border-color)',
+                  padding: '1rem',
+                  borderRadius: '12px',
+                  fontSize: '0.9rem',
+                  lineHeight: 1.6,
+                  color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap'
+                }}
+              >
                 {viewingPost.video_title && (
                   <div style={{ fontWeight: 700, marginBottom: '0.4rem' }}>{viewingPost.video_title}</div>
                 )}
                 {viewingPost.content}
               </div>
 
-              {/* Top-Level Error Message if failed/partial */}
               {viewingPost.error_message && (
-                <div style={{
-                  backgroundColor: 'var(--danger-bg)',
-                  color: 'var(--danger)',
-                  padding: '0.75rem 0.9rem',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '0.8rem',
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '0.45rem'
-                }}>
+                <div className="ss-alert ss-alert-danger" style={{ fontSize: '0.8rem' }}>
                   <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '2px' }} />
                   <span>{viewingPost.error_message}</span>
                 </div>
               )}
 
-              {/* Per-Platform Publishing Telemetry / API Results */}
               {Array.isArray(viewingPost.publish_results) && viewingPost.publish_results.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                     Per-Channel Publishing Log:
                   </span>
                   {viewingPost.publish_results.map((r, idx) => (
@@ -888,9 +849,10 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                       key={idx}
                       style={{
                         fontSize: '0.77rem',
-                        padding: '0.45rem 0.65rem',
-                        borderRadius: 'var(--radius-sm)',
+                        padding: '0.5rem 0.7rem',
+                        borderRadius: '10px',
                         backgroundColor: r.success ? 'var(--success-bg)' : 'var(--danger-bg)',
+                        border: `1px solid ${r.success ? 'var(--success-border)' : 'var(--danger-border)'}`,
                         color: r.success ? 'var(--success)' : 'var(--danger)',
                         display: 'flex',
                         justifyContent: 'space-between',
@@ -902,8 +864,10 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                       <span>
                         <strong>{r.platform}:</strong>{' '}
                         {r.success
-                          ? (r.simulated ? 'Simulated in Sandbox' : `Published (${r.external_post_id || 'Live'})`)
-                          : (r.error || 'Failed')}
+                          ? r.simulated
+                            ? r.label || (r.mode === 'demo' || isDemoMode ? 'Demo Published (Simulated)' : 'Simulated in Sandbox')
+                            : `Published (${r.external_post_id || 'Live'})`
+                          : r.error || 'Failed'}
                       </span>
                       {isSafeHttpUrl(r.permalink) && (
                         <a
@@ -921,7 +885,19 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '0.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem', marginTop: '0.35rem', flexWrap: 'wrap' }}>
+                {isDemoMode && viewingPost.status !== 'published' && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => handleQuickDemoPublish(viewingPost)}
+                    className="btn-secondary"
+                    style={{ borderColor: 'var(--success-border)', color: 'var(--success)', backgroundColor: 'var(--success-bg)' }}
+                  >
+                    <CheckCircle2 size={15} />
+                    <span>{loading ? 'Publishing...' : 'Demo Publish Now'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -930,17 +906,11 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                     handleOpenEdit(toEdit);
                   }}
                   className="btn-primary"
-                  style={{ padding: '0.5rem 1.15rem' }}
                 >
                   <Edit3 size={15} />
                   <span>Edit Post</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setViewingPost(null)}
-                  className="btn-secondary"
-                  style={{ padding: '0.5rem 1.15rem' }}
-                >
+                <button type="button" onClick={() => setViewingPost(null)} className="btn-secondary">
                   Close
                 </button>
               </div>
@@ -951,55 +921,26 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
 
       {/* EDIT POST MODAL */}
       {editingPost && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.65)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 100,
-          padding: '1rem'
-        }}>
-          <div 
-            className="clean-card"
-            style={{
-              width: '100%',
-              maxWidth: '520px',
-              backgroundColor: 'var(--bg-surface)',
-              maxHeight: '90vh',
-              overflowY: 'auto'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Edit3 size={18} color="var(--primary)" />
-                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Edit Scheduled Post</h3>
+        <div className="ss-modal-backdrop" onClick={() => setEditingPost(null)}>
+          <div className="ss-modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                <div className="ss-icon-badge" style={{ width: '34px', height: '34px', backgroundColor: 'var(--lavender)', color: 'var(--primary)' }}>
+                  <Edit3 size={16} />
+                </div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Edit Post</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setEditingPost(null)}
-                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                style={{ background: 'var(--bg-muted)', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', width: '30px', height: '30px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
-                <X size={20} />
+                <X size={16} />
               </button>
             </div>
 
-            <form onSubmit={handleSaveEdit} style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+            <form onSubmit={handleSaveEdit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               {editErrorMsg && (
-                <div style={{
-                  backgroundColor: 'var(--danger-bg)',
-                  color: 'var(--danger)',
-                  padding: '0.65rem 0.85rem',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '0.8rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.45rem'
-                }}>
+                <div className="ss-alert ss-alert-danger" style={{ fontSize: '0.8rem' }}>
                   <AlertCircle size={15} style={{ flexShrink: 0 }} />
                   <span>{editErrorMsg}</span>
                 </div>
@@ -1016,58 +957,39 @@ export default function Calendar({ posts = [], onPostUpdated, onPostDeleted, onN
                 />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div className={isDemoMode ? 'form-group' : 'ss-grid-2'} style={{ gap: '0.85rem' }}>
                 <div className="form-group">
                   <label className="form-label">Status</label>
-                  <select
-                    value={editStatus}
-                    onChange={(e) => setEditStatus(e.target.value)}
-                    className="form-input"
-                  >
+                  <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="form-input">
                     <option value="draft">Draft (Saved for review)</option>
                     <option value="scheduled">Scheduled (Auto-run at time)</option>
-                    <option value="published">Published (Execute now)</option>
+                    <option value="published">{isDemoMode ? 'Demo Publish (Simulate now)' : 'Publish Live (Requires OAuth)'}</option>
                   </select>
                 </div>
 
-                <div className="form-group">
-                  <label className="form-label">Publish Mode</label>
-                  <select
-                    value={editPublishMode}
-                    onChange={(e) => setEditPublishMode(e.target.value)}
-                    className="form-input"
-                  >
-                    <option value="sandbox">Sandbox Mode (Simulation)</option>
-                    <option value="live">Live Mode (Official APIs)</option>
-                  </select>
-                </div>
+                {!isDemoMode && (
+                  <div className="form-group">
+                    <label className="form-label">Publish Mode</label>
+                    <select value={editPublishMode} onChange={(e) => setEditPublishMode(e.target.value)} className="form-input">
+                      <option value="sandbox">Local Draft / Sandbox</option>
+                      <option value="live">Live Mode (OAuth Required)</option>
+                    </select>
+                  </div>
+                )}
               </div>
 
               {editStatus === 'scheduled' && (
                 <div className="form-group">
-                  <label className="form-label">Scheduled Date & Time</label>
-                  <input
-                    type="datetime-local"
-                    value={editDate}
-                    onChange={(e) => setEditDate(e.target.value)}
-                    className="form-input"
-                  />
+                  <label className="form-label">Scheduled Date &amp; Time</label>
+                  <input type="datetime-local" value={editDate} onChange={(e) => setEditDate(e.target.value)} className="form-input" />
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '0.5rem' }}>
-                <button
-                  type="button"
-                  onClick={() => setEditingPost(null)}
-                  className="btn-secondary"
-                >
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem', marginTop: '0.4rem' }}>
+                <button type="button" onClick={() => setEditingPost(null)} className="btn-secondary">
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  disabled={loading}
-                >
+                <button type="submit" className="btn-primary" disabled={loading}>
                   {loading ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>

@@ -792,6 +792,239 @@ def run_tests():
             f"processed={processed_cnt}, sbx={dict(sbx_row) if sbx_row else None}, live={dict(live_row) if live_row else None}",
         )
 
+        # 12G-2. Dual Operating Modes (Dummy Demo Mode vs Live Server Mode) isolation & persistence
+        mode_get_res = client.get('/api/settings/mode', headers=new_auth_hdr)
+        assert_test(
+            "GET /api/settings/mode defaults new user to 'demo' mode",
+            mode_get_res.status_code == 200 and mode_get_res.get_json().get('app_mode') == 'demo',
+            f"status={mode_get_res.status_code}, data={mode_get_res.get_json()}",
+        )
+
+        mode_live_res = client.put('/api/settings/mode', headers=new_auth_hdr, json={'app_mode': 'live'})
+        mode_bad_res = client.put('/api/settings/mode', headers=new_auth_hdr, json={'app_mode': 'invalid'})
+        mode_demo_res = client.put('/api/settings/mode', headers=new_auth_hdr, json={'app_mode': 'demo'})
+        assert_test(
+            "PUT /api/settings/mode persists valid switches and rejects invalid values",
+            mode_live_res.status_code == 200
+            and mode_live_res.get_json().get('app_mode') == 'live'
+            and mode_bad_res.status_code == 400
+            and mode_demo_res.status_code == 200
+            and mode_demo_res.get_json().get('app_mode') == 'demo',
+        )
+
+        demo_accs_res = client.get('/api/accounts?workspace_mode=demo', headers=new_auth_hdr)
+        demo_posts_res = client.get('/api/posts?workspace_mode=demo', headers=new_auth_hdr)
+        demo_camps_res = client.get('/api/campaigns?workspace_mode=demo', headers=new_auth_hdr)
+        demo_acts_res = client.get('/api/activity?workspace_mode=demo', headers=new_auth_hdr)
+        demo_anlt_res = client.get('/api/analytics?range=30d&workspace_mode=demo', headers=new_auth_hdr)
+        live_posts_res = client.get('/api/posts?workspace_mode=live', headers=new_auth_hdr)
+        live_anlt_res = client.get('/api/analytics?range=7d&workspace_mode=live', headers=new_auth_hdr)
+
+        demo_accs_data = demo_accs_res.get_json() or []
+        demo_posts_data = demo_posts_res.get_json() or []
+        demo_camps_data = demo_camps_res.get_json() or []
+        demo_acts_data = demo_acts_res.get_json() or []
+        demo_anlt_data = demo_anlt_res.get_json() or {}
+        live_anlt_data = live_anlt_res.get_json() or {}
+
+        assert_test(
+            "Demo workspace lazily seeds realistic accounts, posts, campaigns, activity, and analytics cleanly separated from Live",
+            len(demo_accs_data) >= 6
+            and any(a['platform'] == 'Instagram' and a['followers'] > 0 and a.get('demo_connected') for a in demo_accs_data)
+            and len(demo_posts_data) >= 4
+            and len(demo_camps_data) >= 3
+            and len(demo_acts_data) >= 3
+            and demo_anlt_data.get('workspace_mode') == 'demo'
+            and demo_anlt_data.get('summary', {}).get('total_followers', 0) > 0
+            and live_anlt_data.get('workspace_mode') == 'live'
+            and live_anlt_data.get('live_analytics', {}).get('oauth_required') is True,
+            f"demo_accs={len(demo_accs_data)}, demo_posts={len(demo_posts_data)}, live_oauth_req={live_anlt_data.get('live_analytics', {}).get('oauth_required')}",
+        )
+
+        # Create, Demo Publish, Edit, Reschedule & Delete in Demo Mode; confirm Live stays untouched
+        live_count_before = len(live_posts_res.get_json() or [])
+        demo_pub_res = client.post(
+            '/api/posts',
+            headers=new_auth_hdr,
+            json={
+                'workspace_mode': 'demo',
+                'content': 'Demo Publish isolation check post #DemoSync',
+                'platforms': ['Instagram', 'YouTube'],
+                'status': 'published',
+                'publish_mode': 'demo',
+            },
+        )
+        demo_pub_data = demo_pub_res.get_json() or {}
+        demo_pub_id = demo_pub_data.get('id')
+        live_count_after = len(client.get('/api/posts?workspace_mode=live', headers=new_auth_hdr).get_json() or [])
+        assert_test(
+            "Creating Demo Published post labels simulated results as 'Demo Published' and keeps Live posts untouched",
+            demo_pub_res.status_code == 201
+            and demo_pub_data.get('workspace_mode') == 'demo'
+            and demo_pub_data.get('publish_mode') == 'demo'
+            and any(r.get('label') == 'Demo Published' for r in (demo_pub_data.get('publish_results') or []))
+            and live_count_after == live_count_before,
+        )
+
+        # Cross-workspace edit block + Demo edit/delete persistence
+        cross_edit_res = client.put(
+            f'/api/posts/{demo_pub_id}?workspace_mode=live',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'live', 'content': 'Cross mode attempt'},
+        )
+        demo_edit_res = client.put(
+            f'/api/posts/{demo_pub_id}?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo', 'content': 'Updated Demo Post Content'},
+        )
+        demo_search_res = client.get('/api/search?workspace_mode=demo&q=Updated%20Demo%20Post', headers=new_auth_hdr)
+        demo_del_res = client.delete(f'/api/posts/{demo_pub_id}?workspace_mode=demo', headers=new_auth_hdr)
+        demo_search_after = client.get('/api/search?workspace_mode=demo&q=Updated%20Demo%20Post', headers=new_auth_hdr)
+
+        assert_test(
+            "Cross-workspace edit is blocked (404) while Demo CRUD & Search persist properly",
+            cross_edit_res.status_code == 404
+            and demo_edit_res.status_code == 200
+            and len((demo_search_res.get_json() or {}).get('posts') or []) == 1
+            and demo_del_res.status_code == 200
+            and len((demo_search_after.get_json() or {}).get('posts') or []) == 0,
+        )
+
+        # Explicit Live sync without OAuth returns honest OAuth Setup Required; Demo sync succeeds
+        live_accs = client.get('/api/accounts?workspace_mode=live', headers=new_auth_hdr).get_json() or []
+        live_ig_id = next((a['id'] for a in live_accs if a['platform'] == 'Instagram'), None)
+        demo_ig_id = next((a['id'] for a in demo_accs_data if a['platform'] == 'Instagram'), None)
+        live_sync_res = client.post(
+            f'/api/accounts/{live_ig_id}/sync?workspace_mode=live',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'live'},
+        )
+        demo_sync_res = client.post(
+            f'/api/accounts/{demo_ig_id}/sync?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo'},
+        )
+        assert_test(
+            "Explicit Live sync returns honest OAuth Setup Required while Demo sync updates demo metrics",
+            live_sync_res.status_code == 400
+            and 'OAuth Setup Required' in (live_sync_res.get_json() or {}).get('error', '')
+            and demo_sync_res.status_code == 200
+            and (demo_sync_res.get_json() or {}).get('account', {}).get('mode') == 'demo',
+            f"live_status={live_sync_res.status_code}, demo_status={demo_sync_res.status_code}",
+        )
+
+        # 12G.2 Dummy Demo Mode Persistence, Dynamic Analytics & Notifications
+        me_check = client.get('/api/auth/me', headers=new_auth_hdr).get_json() or {}
+        demo_accs_repeat = client.get('/api/accounts?workspace_mode=demo', headers=new_auth_hdr).get_json() or []
+        demo_posts_repeat_1 = client.get('/api/posts?workspace_mode=demo', headers=new_auth_hdr).get_json() or []
+        demo_posts_repeat_2 = client.get('/api/posts?workspace_mode=demo', headers=new_auth_hdr).get_json() or []
+        demo_camps_repeat_1 = client.get('/api/campaigns?workspace_mode=demo', headers=new_auth_hdr).get_json() or []
+        demo_camps_repeat_2 = client.get('/api/campaigns?workspace_mode=demo', headers=new_auth_hdr).get_json() or []
+        assert_test(
+            "Demo seeding is idempotent without duplicate records and /api/auth/me exposes app_mode",
+            me_check.get('app_mode') in ('demo', 'live')
+            and len(demo_accs_repeat) == 6
+            and len(demo_posts_repeat_1) == len(demo_posts_repeat_2)
+            and len(demo_camps_repeat_1) == len(demo_camps_repeat_2) == 3,
+        )
+
+        # Toggle account & capture analytics baseline before Demo Publish/Campaign lifecycle
+        toggle_demo_res = client.post(
+            f'/api/accounts/{demo_ig_id}/toggle?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo'},
+        )
+        an_before = client.get('/api/analytics?workspace_mode=demo&range=7d', headers=new_auth_hdr).get_json() or {}
+        reach_before = (an_before.get('summary') or {}).get('total_reach', 0)
+
+        # Campaign -> linked Demo Publish -> Delete linked post -> Campaign reach drops back to 0 -> Edit -> Delete
+        camp_res = client.post(
+            '/api/campaigns?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo', 'title': 'Demo QA Campaign', 'target_reach': 100000, 'budget': '$2,500'},
+        )
+        camp_id = (camp_res.get_json() or {}).get('id')
+        sched_res = client.post(
+            '/api/posts?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={
+                'workspace_mode': 'demo',
+                'publish_mode': 'demo',
+                'campaign_id': camp_id,
+                'content': 'Demo Scheduled Announcement',
+                'platforms': ['Instagram'],
+                'status': 'scheduled',
+                'scheduled_for': '2026-12-01 10:00:00',
+            },
+        )
+        sched_id = (sched_res.get_json() or {}).get('id')
+        resched_res = client.put(
+            f'/api/posts/{sched_id}?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo', 'status': 'scheduled', 'scheduled_for': '2026-12-03 14:30:00'},
+        )
+        pub_camp_res = client.put(
+            f'/api/posts/{sched_id}?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo', 'status': 'published', 'publish_mode': 'demo'},
+        )
+        camp_mid = next(
+            (c for c in (client.get('/api/campaigns?workspace_mode=demo', headers=new_auth_hdr).get_json() or []) if c['id'] == camp_id),
+            {},
+        )
+        an_mid = client.get('/api/analytics?workspace_mode=demo&range=7d', headers=new_auth_hdr).get_json() or {}
+        reach_mid = (an_mid.get('summary') or {}).get('total_reach', 0)
+        hist_mid = an_mid.get('history') or []
+        hist_sum_mid = sum(h.get('reach', 0) for h in hist_mid)
+
+        del_linked_res = client.delete(f'/api/posts/{sched_id}?workspace_mode=demo', headers=new_auth_hdr)
+        camp_after_del = next(
+            (c for c in (client.get('/api/campaigns?workspace_mode=demo', headers=new_auth_hdr).get_json() or []) if c['id'] == camp_id),
+            {},
+        )
+        an_after = client.get('/api/analytics?workspace_mode=demo&range=7d', headers=new_auth_hdr).get_json() or {}
+        reach_after = (an_after.get('summary') or {}).get('total_reach', 0)
+
+        edit_camp_res = client.put(
+            f'/api/campaigns/{camp_id}?workspace_mode=demo',
+            headers=new_auth_hdr,
+            json={'workspace_mode': 'demo', 'title': 'Demo QA Campaign Updated', 'status': 'completed', 'target_reach': 120000},
+        )
+        del_camp_res = client.delete(f'/api/campaigns/{camp_id}?workspace_mode=demo', headers=new_auth_hdr)
+        demo_act_titles = [
+            a.get('title') for a in (client.get('/api/activity?workspace_mode=demo', headers=new_auth_hdr).get_json() or [])
+        ]
+
+        assert_test(
+            "Demo Campaign reach, Analytics 7d curve, and Post/Campaign delete stay dynamically synchronized",
+            camp_res.status_code == 201
+            and sched_res.status_code == 201
+            and resched_res.status_code == 200
+            and pub_camp_res.status_code == 200
+            and (camp_mid.get('current_reach') or 0) > 0
+            and reach_mid > reach_before
+            and len(hist_mid) == 7
+            and abs(hist_sum_mid - reach_mid) <= 50
+            and del_linked_res.status_code == 200
+            and camp_after_del.get('current_reach') == 0
+            and reach_after == reach_before
+            and edit_camp_res.status_code == 200
+            and del_camp_res.status_code == 200,
+            f"reach_before={reach_before}, reach_mid={reach_mid}, hist_sum={hist_sum_mid}, camp_after_del={camp_after_del.get('current_reach')}, reach_after={reach_after}",
+        )
+        assert_test(
+            "Demo Activity notifications record Sync, Toggle, Reschedule, Publish, Delete, and Campaign edits",
+            toggle_demo_res.status_code == 200
+            and any('Instagram' in (t or '') and ('Paused' in t or 'Connected' in t) for t in demo_act_titles)
+            and any('Instagram Synced' in (t or '') for t in demo_act_titles)
+            and 'Demo Post Rescheduled' in demo_act_titles
+            and 'Demo Published' in demo_act_titles
+            and 'Demo Post Deleted' in demo_act_titles
+            and 'Demo Campaign Updated' in demo_act_titles
+            and 'Demo Campaign Deleted' in demo_act_titles,
+            f"titles={demo_act_titles}",
+        )
+
         # 12H. Server-side token revocation (POST /api/auth/logout) & rate limiting (429)
         logout_res = client.post('/api/auth/logout', headers=new_auth_hdr)
         revoked_me = client.get('/api/auth/me', headers=new_auth_hdr)

@@ -1,11 +1,19 @@
-/* SocialSync Responsive Layout & UI Utilities */
-
 .app-container {
   display: flex;
   min-height: 100vh;
-  width: 100vw;
+  width: 100%;
   background-color: var(--bg-app);
+  background-image:
+    radial-gradient(at 15% 0%, rgba(99, 91, 255, 0.06) 0px, transparent 52%),
+    radial-gradient(at 88% 8%, rgba(139, 92, 246, 0.05) 0px, transparent 48%);
   overflow-x: hidden;
+  transition: background-color 0.24s ease;
+}
+
+.dark .app-container {
+  background-image:
+    radial-gradient(at 18% 0%, rgba(124, 115, 255, 0.11) 0px, transparent 52%),
+    radial-gradient(at 88% 10%, rgba(139, 92, 246, 0.08) 0px, transparent 48%);
 }
 
 .main-content {
@@ -20,54 +28,94 @@
 
 .content-body {
   flex: 1;
-  padding: 2.25rem 2.5rem;
-  max-width: 1440px;
+  padding: 1.85rem 2.25rem 2.75rem;
+  max-width: 1460px;
   width: 100%;
   margin: 0 auto;
   box-sizing: border-box;
 }
 
-/* Animations */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
+/* Smooth fade transition for active views */
 .animate-fade-in {
-  animation: fadeIn 0.2s ease-out forwards;
+  animation: fadeIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-/* Responsive Breakpoints */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sidebar-desktop {
+  display: block;
+}
+
+.mobile-nav-toggle {
+  display: none !important;
+}
+
+/* Compose Studio split layout */
+.ss-compose-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+/* Calendar responsive grid layout */
+.calendar-grid-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.85fr) minmax(300px, 1fr);
+  gap: 1.4rem;
+  align-items: start;
+}
+
+/* Settings split layout */
+.ss-settings-grid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 1120px) {
+  .ss-compose-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 1024px) {
   .content-body {
-    padding: 1.75rem 1.5rem;
+    padding: 1.35rem 1.35rem 2.25rem;
+  }
+
+  .calendar-grid-layout,
+  .ss-settings-grid {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 900px) {
   .sidebar-desktop {
-    display: none !important;
+    display: none;
   }
-  
+
   .mobile-nav-toggle {
-    display: flex !important;
+    display: inline-flex !important;
   }
 
   .nav-search-bar {
     display: none !important;
   }
-
-  .content-body {
-    padding: 1.25rem 1rem;
-  }
-
-  .calendar-grid-layout {
-    grid-template-columns: 1fr !important;
-  }
 }
 
 @media (max-width: 640px) {
   .content-body {
-    padding: 1rem 0.75rem;
+    padding: 1rem 0.95rem 2rem;
   }
 }

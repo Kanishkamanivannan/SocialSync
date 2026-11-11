@@ -14,7 +14,7 @@ from werkzeug.utils import secure_filename
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadTimeSignature
 
 from env_loader import load_env_file
-from database import get_db_connection, init_db, ensure_user_social_accounts
+from database import get_db_connection, init_db, ensure_user_social_accounts, ensure_user_demo_workspace
 from token_crypto import encrypt_token, decrypt_token, get_runtime_secret, redact_secrets
 from social_integrations import (
     social_manager,
@@ -204,8 +204,50 @@ def _resolve_local_upload_path(media_url):
     return candidate if os.path.isfile(candidate) else None
 
 
+def _resolve_workspace_mode(data=None) -> str:
+    """Resolves isolated workspace mode ('demo' or 'live'), defaulting to 'live' for unlabeled API callers."""
+    raw = None
+    if isinstance(data, dict):
+        raw = data.get('workspace_mode')
+    if not raw:
+        raw = request.args.get('workspace_mode')
+    mode = str(raw).strip().lower() if raw else 'live'
+    return 'demo' if mode == 'demo' else 'live'
+
+
+def _ensure_workspace(conn, user_id: int, workspace_mode: str) -> None:
+    if workspace_mode == 'demo':
+        ensure_user_demo_workspace(conn, user_id)
+    else:
+        ensure_user_social_accounts(conn, user_id)
+
+
+def _local_now_str() -> str:
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _record_activity(
+    conn,
+    user_id: int,
+    act_type: str,
+    title: str,
+    description: str,
+    platform: str = 'Multi-channel',
+    workspace_mode: str = 'demo',
+) -> None:
+    """Appends an activity feed entry using consistent local wall-clock timestamps."""
+    conn.execute(
+        '''
+        INSERT INTO activity (user_id, type, title, description, platform, workspace_mode, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (int(user_id), act_type, title, redact_secrets(description), platform, workspace_mode, _local_now_str()),
+    )
+
+
 def _serialize_post(post_row):
     item = dict(post_row)
+    item['workspace_mode'] = item.get('workspace_mode') or 'live'
     try:
         item['platforms'] = json.loads(item['platforms'])
     except Exception:
@@ -309,6 +351,7 @@ def _execute_post_publishing(
     local_file_path = _resolve_local_upload_path(media_url)
 
     if publish_mode != 'live':
+        effective_mode = 'demo' if publish_mode == 'demo' else 'sandbox'
         for pl in platforms:
             sim_res = social_manager.simulate_sandbox_publish(pl)
             perf = sim_res.get('initial_performance', {})
@@ -320,15 +363,20 @@ def _execute_post_publishing(
                 'platform': pl,
                 'success': True,
                 'simulated': True,
-                'mode': 'sandbox',
+                'mode': effective_mode,
+                'label': 'Demo Published' if effective_mode == 'demo' else 'Simulated (Sandbox)',
                 'external_post_id': sim_res.get('external_post_id'),
                 'permalink': None,
                 'published_at': sim_res.get('published_at'),
-                'message': sim_res.get('message'),
+                'message': (
+                    f"Demo Published to {pl} (local simulation — not sent to real social media account)."
+                    if effective_mode == 'demo'
+                    else sim_res.get('message')
+                ),
             })
         return {
             'status': 'published',
-            'publish_mode': 'sandbox',
+            'publish_mode': effective_mode,
             'publish_results': publish_results,
             'error_message': None,
             'reach': total_reach,
@@ -340,7 +388,7 @@ def _execute_post_publishing(
     # --- LIVE MODE: Official APIs Only (Never simulate success!) ---
     for pl in platforms:
         acc_row = conn.execute(
-            'SELECT * FROM social_accounts WHERE user_id = ? AND LOWER(platform) = LOWER(?) ORDER BY id ASC LIMIT 1',
+            "SELECT * FROM social_accounts WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = 'live' AND LOWER(platform) = LOWER(?) ORDER BY id ASC LIMIT 1",
             (int(user_id), pl),
         ).fetchone()
         if acc_row and acc_row['connected'] == 0:
@@ -359,15 +407,16 @@ def _execute_post_publishing(
         if not oauth_conn:
             caps = social_manager.get_capabilities(pl)
             if not caps.get('official_api'):
-                err_msg = f"{pl} only supports Sandbox Mode in this release (no live OAuth connector)."
+                err_msg = f"{pl} is not supported in Live Server Mode (no official OAuth integration in this release)."
             else:
-                err_msg = f"{pl} is not authorized via OAuth. Connect {pl} via OAuth on the Accounts page before Live publishing."
+                err_msg = f"OAuth Setup Required — {pl} requires official OAuth configuration before publishing externally."
             errors.append(f"{pl}: {err_msg}")
             publish_results.append({
                 'platform': pl,
                 'success': False,
                 'simulated': False,
                 'mode': 'live',
+                'oauth_required': bool(caps.get('official_api')),
                 'error': err_msg,
             })
             continue
@@ -541,7 +590,16 @@ def process_due_scheduled_posts(now_str: str | None = None) -> int:
                 except Exception:
                     platforms = [post['platforms']] if post['platforms'] else ['Instagram']
 
-                post_mode = (post['publish_mode'] if 'publish_mode' in post.keys() and post['publish_mode'] else 'sandbox')
+                post_workspace_mode = (
+                    post['workspace_mode']
+                    if 'workspace_mode' in post.keys() and post['workspace_mode']
+                    else 'live'
+                )
+                post_mode = (
+                    'demo'
+                    if post_workspace_mode == 'demo'
+                    else (post['publish_mode'] if 'publish_mode' in post.keys() and post['publish_mode'] else 'sandbox')
+                )
                 media_type = _detect_media_type(
                     post['media_url'],
                     post['media_type'] if 'media_type' in post.keys() else None,
@@ -590,12 +648,15 @@ def process_due_scheduled_posts(now_str: str | None = None) -> int:
                 preview = (post['content'][:45] + '...') if len(post['content']) > 45 else post['content']
                 safe_err = redact_secrets(pub_outcome['error_message']) if pub_outcome.get('error_message') else ''
                 if pub_outcome['status'] == 'published':
-                    act_title = (
-                        'Scheduled Post Published Live'
-                        if post_mode == 'live'
-                        else 'Scheduled Post Published [Sandbox]'
-                    )
-                    act_desc = f"'{preview}' processed in {post_mode.upper()} mode across {len(platforms)} platform(s)."
+                    if post_mode == 'live':
+                        act_title = 'Scheduled Post Published Live'
+                        act_desc = f"'{preview}' processed in LIVE mode across {len(platforms)} platform(s)."
+                    elif post_mode == 'demo':
+                        act_title = 'Demo Published (Scheduled)'
+                        act_desc = f"'{preview}' simulated as Demo Published across {len(platforms)} demo channel(s)."
+                    else:
+                        act_title = 'Scheduled Post Published [Sandbox]'
+                        act_desc = f"'{preview}' processed in SANDBOX mode across {len(platforms)} platform(s)."
                 elif pub_outcome['status'] == 'partial':
                     act_title = 'Scheduled Post Partially Published'
                     act_desc = f"'{preview}' succeeded on some channels but failed on others: {safe_err}"
@@ -605,10 +666,10 @@ def process_due_scheduled_posts(now_str: str | None = None) -> int:
 
                 cursor.execute(
                     '''
-                    INSERT INTO activity (user_id, type, title, description, platform)
-                    VALUES (?, 'post', ?, ?, ?)
+                    INSERT INTO activity (user_id, type, title, description, platform, workspace_mode)
+                    VALUES (?, 'post', ?, ?, ?, ?)
                     ''',
-                    (post_uid, act_title, redact_secrets(act_desc), platforms[0] if platforms else 'Multi-channel'),
+                    (post_uid, act_title, redact_secrets(act_desc), platforms[0] if platforms else 'Multi-channel', post_workspace_mode),
                 )
                 conn.commit()
                 processed += 1
@@ -786,6 +847,7 @@ def register():
         ''', (name, username, email, hashed_pwd, avatar))
         user_id = cursor.lastrowid
         ensure_user_social_accounts(conn, user_id)
+        ensure_user_demo_workspace(conn, user_id)
         conn.commit()
     finally:
         conn.close()
@@ -799,7 +861,8 @@ def register():
             "username": username,
             "email": email,
             "avatar": avatar,
-            "role": "Social Media Manager"
+            "role": "Social Media Manager",
+            "app_mode": "demo"
         },
         "token": token
     }), 201
@@ -852,7 +915,14 @@ def login():
         if user and user['password'].startswith(('scrypt:', 'pbkdf2:')):
             if check_password_hash(user['password'], password):
                 _clear_rate_limit(fail_key)
+                user_app_mode = (
+                    user['app_mode']
+                    if 'app_mode' in user.keys() and user['app_mode'] in ('demo', 'live')
+                    else 'demo'
+                )
                 ensure_user_social_accounts(conn, user['id'])
+                if user_app_mode == 'demo':
+                    ensure_user_demo_workspace(conn, user['id'])
                 conn.commit()
                 db_ver = user['token_version'] if 'token_version' in user.keys() and user['token_version'] is not None else 1
                 token = generate_token(user['id'], db_ver)
@@ -864,7 +934,8 @@ def login():
                         "username": user['username'] if 'username' in user.keys() and user['username'] else ('@' + user['name'].lower().replace(' ', '')),
                         "email": user['email'],
                         "avatar": user['avatar'],
-                        "role": user['role']
+                        "role": user['role'],
+                        "app_mode": user_app_mode
                     },
                     "token": token
                 })
@@ -936,7 +1007,10 @@ def update_profile():
         ''', (name, '@' + username if username else user['username'], email, role, avatar, user['id']))
         conn.commit()
 
-        updated = conn.execute('SELECT id, name, username, email, avatar, role FROM users WHERE id = ?', (user['id'],)).fetchone()
+        updated = conn.execute(
+            "SELECT id, name, username, email, avatar, role, COALESCE(app_mode, 'demo') as app_mode FROM users WHERE id = ?",
+            (user['id'],),
+        ).fetchone()
     finally:
         conn.close()
 
@@ -972,6 +1046,30 @@ def user_notification_settings():
         "notify_engage": bool(curr['notify_engage'] if curr else 1),
         "notify_email": bool(curr['notify_email'] if curr else 0)
     })
+
+
+@app.route('/api/settings/mode', methods=['GET', 'PUT'])
+@auth_required
+def user_app_mode():
+    """Gets or switches the user's preferred operating mode ('demo' or 'live') cleanly in SQLite."""
+    user = request.current_user
+    conn = get_db_connection()
+    try:
+        if request.method == 'PUT':
+            data = request.get_json() or {}
+            requested = str(data.get('app_mode', '')).strip().lower()
+            if requested not in ('demo', 'live'):
+                return jsonify({"success": False, "error": "app_mode must be 'demo' or 'live'."}), 400
+            conn.execute('UPDATE users SET app_mode = ? WHERE id = ?', (requested, user['id']))
+            _ensure_workspace(conn, user['id'], requested)
+            conn.commit()
+            return jsonify({"success": True, "app_mode": requested})
+
+        row = conn.execute('SELECT app_mode FROM users WHERE id = ?', (user['id'],)).fetchone()
+        current_mode = (row['app_mode'] if row and row['app_mode'] in ('demo', 'live') else 'demo')
+        return jsonify({"app_mode": current_mode})
+    finally:
+        conn.close()
 
 def _upsert_oauth_connection(
     conn,
@@ -1762,15 +1860,55 @@ def disconnect_oauth(platform):
 # --- SOCIAL ACCOUNTS ENDPOINTS ---
 def _enrich_account_dict(conn, acc_row, user_id):
     item = dict(acc_row)
+    workspace_mode = item.get('workspace_mode') or 'live'
+    info = social_manager.get_platform_info(item['platform'], None)
+    caps = info.get('capabilities', {})
+
+    if workspace_mode == 'demo':
+        item['workspace_mode'] = 'demo'
+        item['mode'] = 'demo'
+        item['credentials_configured'] = 0
+        item['oauth_configured'] = False
+        item['oauth_connected'] = False
+        item['oauth_required'] = False
+        item['demo_connected'] = bool(item.get('connected'))
+        item['missing_env'] = []
+        item['capabilities'] = caps
+        item['scopes'] = []
+        item['last_error'] = None
+        item['needs_reauth'] = False
+        item['followers'] = int(item.get('followers') or 0)
+        item['following'] = int(item.get('following') or 0)
+        item['last_synced'] = item.get('last_synced') or _local_now_str()
+        item['status_message'] = (
+            "Demo Connected (Local SQLite)"
+            if item.get('connected')
+            else "Demo Channel Paused"
+        )
+        try:
+            item['account_meta'] = json.loads(item.get('account_meta') or '{}')
+        except Exception:
+            item['account_meta'] = {}
+        return item
+
     oauth_conn = _get_active_oauth_connection(conn, item['platform'], user_id)
     info = social_manager.get_platform_info(item['platform'], oauth_conn)
+    item['workspace_mode'] = 'live'
     item['mode'] = info['mode']
     item['credentials_configured'] = 1 if info['configured'] else 0
     item['oauth_configured'] = info['oauth_configured']
     item['oauth_connected'] = info['oauth_connected']
+    item['oauth_required'] = bool(caps.get('official_api') and not info['oauth_connected'])
+    item['demo_connected'] = False
     item['missing_env'] = info['missing_env']
-    item['capabilities'] = info['capabilities']
-    item['status_message'] = info['status_message']
+    item['capabilities'] = caps
+    if info['oauth_connected']:
+        item['status_message'] = info['status_message']
+    elif caps.get('official_api'):
+        item['status_message'] = "OAuth Setup Required — external publishing & live metrics require OAuth authorization."
+    else:
+        item['status_message'] = "Not supported for external live publishing in Live Server Mode."
+
     if oauth_conn:
         try:
             item['scopes'] = json.loads(oauth_conn.get('scopes') or '[]')
@@ -1803,13 +1941,14 @@ def _enrich_account_dict(conn, acc_row, user_id):
 @auth_required
 def get_accounts():
     user_id = request.current_user['id']
+    workspace_mode = _resolve_workspace_mode()
     conn = get_db_connection()
     try:
-        ensure_user_social_accounts(conn, user_id)
+        _ensure_workspace(conn, user_id, workspace_mode)
         conn.commit()
         accounts = conn.execute(
-            'SELECT * FROM social_accounts WHERE user_id = ? ORDER BY id ASC',
-            (user_id,),
+            "SELECT * FROM social_accounts WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? ORDER BY id ASC",
+            (user_id, workspace_mode),
         ).fetchall()
         result = [_enrich_account_dict(conn, acc, user_id) for acc in accounts]
     finally:
@@ -1821,20 +1960,43 @@ def get_accounts():
 @auth_required
 def toggle_account_connection(acc_id):
     user_id = request.current_user['id']
+    data = request.get_json(silent=True) or {}
+    explicit_wmode = (data.get('workspace_mode') if isinstance(data, dict) else None) or request.args.get('workspace_mode')
+    wmode_filter = ('demo' if str(explicit_wmode).strip().lower() == 'demo' else 'live') if explicit_wmode else None
+
     conn = get_db_connection()
     try:
-        account = conn.execute(
-            'SELECT * FROM social_accounts WHERE id = ? AND user_id = ?',
-            (acc_id, user_id),
-        ).fetchone()
+        if wmode_filter:
+            account = conn.execute(
+                "SELECT * FROM social_accounts WHERE id = ? AND user_id = ? AND COALESCE(workspace_mode, 'live') = ?",
+                (acc_id, user_id, wmode_filter),
+            ).fetchone()
+        else:
+            account = conn.execute(
+                'SELECT * FROM social_accounts WHERE id = ? AND user_id = ?',
+                (acc_id, user_id),
+            ).fetchone()
         if not account:
             return jsonify({"error": "Account not found"}), 404
 
         new_status = 0 if account['connected'] else 1
+        acc_wmode = account['workspace_mode'] if 'workspace_mode' in account.keys() and account['workspace_mode'] else 'live'
+        now_str = _local_now_str()
         conn.execute(
-            'UPDATE social_accounts SET connected = ?, last_synced = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
-            (new_status, acc_id, user_id),
+            'UPDATE social_accounts SET connected = ?, last_synced = ? WHERE id = ? AND user_id = ?',
+            (new_status, now_str, acc_id, user_id),
         )
+        if acc_wmode == 'demo':
+            action_label = "Connected" if new_status else "Paused"
+            _record_activity(
+                conn,
+                user_id,
+                'account',
+                f"Demo {account['platform']} {action_label}",
+                f"{'Enabled' if new_status else 'Paused'} {account['platform']} ({account['handle'] or account['name']}) in Demo Mode.",
+                account['platform'],
+                'demo',
+            )
         conn.commit()
         updated = conn.execute(
             'SELECT * FROM social_accounts WHERE id = ? AND user_id = ?',
@@ -1846,8 +2008,23 @@ def toggle_account_connection(acc_id):
     return jsonify(item)
 
 
-def _sync_single_account(conn, acc_row, user_id):
+def _sync_single_account(conn, acc_row, user_id, explicit_live=False):
     platform = acc_row['platform']
+    acc_workspace_mode = acc_row['workspace_mode'] if 'workspace_mode' in acc_row.keys() and acc_row['workspace_mode'] else 'live'
+
+    if acc_workspace_mode == 'demo':
+        sim_data = social_manager.simulate_sandbox_metrics(acc_row['followers'])
+        now_str = _local_now_str()
+        conn.execute(
+            '''
+            UPDATE social_accounts
+            SET followers = ?, growth = ?, mode = 'demo', credentials_configured = 0, last_synced = ?
+            WHERE id = ? AND user_id = ?
+            ''',
+            (sim_data['followers'], sim_data['growth'], now_str, acc_row['id'], int(user_id)),
+        )
+        return True, sim_data, None
+
     oauth_conn = _get_active_oauth_connection(conn, platform, user_id)
     if oauth_conn:
         aad = _oauth_aad(user_id, platform)
@@ -1941,7 +2118,13 @@ def _sync_single_account(conn, acc_row, user_id):
         )
         return True, sync_res, perm_note
 
-    # Sandbox account sync
+    if explicit_live:
+        caps = social_manager.get_capabilities(platform)
+        if caps.get('official_api'):
+            return False, None, f"OAuth Setup Required for {platform} live metrics."
+        return False, None, f"{platform} external API sync is not available in Live Server Mode."
+
+    # Legacy/unlabeled sandbox account sync compatibility
     sim_data = social_manager.simulate_sandbox_metrics(acc_row['followers'])
     conn.execute(
         '''
@@ -1958,6 +2141,8 @@ def _sync_single_account(conn, acc_row, user_id):
 @auth_required
 def sync_single_account_endpoint(acc_id):
     user_id = request.current_user['id']
+    explicit_mode = request.args.get('workspace_mode') or (request.get_json(silent=True) or {}).get('workspace_mode')
+    explicit_live = str(explicit_mode or '').strip().lower() == 'live'
     conn = get_db_connection()
     try:
         acc = conn.execute(
@@ -1967,18 +2152,29 @@ def sync_single_account_endpoint(acc_id):
         if not acc:
             return jsonify({"success": False, "error": "Account not found"}), 404
 
-        ok, sync_res, note = _sync_single_account(conn, acc, user_id)
-        conn.commit()
+        ok, sync_res, note = _sync_single_account(conn, acc, user_id, explicit_live=explicit_live)
         updated = conn.execute(
             'SELECT * FROM social_accounts WHERE id = ? AND user_id = ?',
             (acc_id, user_id),
         ).fetchone()
         enriched = _enrich_account_dict(conn, updated, user_id)
+        if ok and enriched.get('workspace_mode') == 'demo':
+            _record_activity(
+                conn,
+                user_id,
+                'account',
+                f"Demo {acc['platform']} Synced",
+                f"Simulated {acc['platform']} metrics updated ({enriched['followers']:,} followers, {enriched.get('growth', '+0.0%')}).",
+                acc['platform'],
+                'demo',
+            )
+        conn.commit()
     finally:
         conn.close()
 
     if not ok:
-        return jsonify({"success": False, "error": note, "account": enriched}), 502
+        status_code = 400 if 'OAuth Setup Required' in (note or '') else 502
+        return jsonify({"success": False, "oauth_required": True, "error": note, "account": enriched}), status_code
 
     msg = f"{acc['platform']} synced in {enriched['mode'].upper()} mode."
     if note:
@@ -1990,19 +2186,22 @@ def sync_single_account_endpoint(acc_id):
 @auth_required
 def sync_all_accounts():
     user_id = request.current_user['id']
+    explicit_mode = request.args.get('workspace_mode') or (request.get_json(silent=True) or {}).get('workspace_mode')
+    workspace_mode = _resolve_workspace_mode(request.get_json(silent=True) or {})
+    explicit_live = str(explicit_mode or '').strip().lower() == 'live'
     conn = get_db_connection()
     try:
-        ensure_user_social_accounts(conn, user_id)
+        _ensure_workspace(conn, user_id, workspace_mode)
         accounts = conn.execute(
-            'SELECT * FROM social_accounts WHERE user_id = ? ORDER BY id ASC',
-            (user_id,),
+            "SELECT * FROM social_accounts WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? ORDER BY id ASC",
+            (user_id, workspace_mode),
         ).fetchall()
         updated_list = []
         errors = []
         notes = []
 
         for acc in accounts:
-            ok, _, note = _sync_single_account(conn, acc, user_id)
+            ok, _, note = _sync_single_account(conn, acc, user_id, explicit_live=explicit_live)
             if not ok:
                 errors.append(f"{acc['platform']}: {note}")
             elif note:
@@ -2014,18 +2213,24 @@ def sync_all_accounts():
             updated_list.append(_enrich_account_dict(conn, updated_acc, user_id))
         conn.commit()
 
-        act_desc = "Synchronized accounts."
+        act_desc = (
+            "Demo metrics refreshed across connected demo channels."
+            if workspace_mode == 'demo'
+            else "Synchronized live workspace accounts."
+        )
         if errors:
-            act_desc = f"Sync completed with API errors: {' | '.join(errors)}"
+            act_desc = f"OAuth Setup Required for unlinked channels ({len(errors)} channel(s))."
         elif notes:
             act_desc = f"Accounts synchronized. Notes: {' | '.join(notes)}"
 
-        conn.execute(
-            '''
-            INSERT INTO activity (user_id, type, title, description, platform)
-            VALUES (?, 'account', 'Accounts Synchronized', ?, 'Multi-channel')
-            ''',
-            (user_id, redact_secrets(act_desc)),
+        _record_activity(
+            conn,
+            user_id,
+            'account',
+            'Demo Accounts Refreshed' if workspace_mode == 'demo' else 'Accounts Synchronized',
+            act_desc,
+            'Multi-channel',
+            workspace_mode,
         )
         conn.commit()
     finally:
@@ -2033,13 +2238,16 @@ def sync_all_accounts():
 
     return jsonify({
         "success": len(errors) == 0,
+        "oauth_required": bool(explicit_live and errors),
         "accounts": updated_list,
         "errors": errors,
         "notes": notes,
         "message": (
-            "All accounts synchronized successfully!"
+            "All demo accounts refreshed in SQLite!"
+            if workspace_mode == 'demo'
+            else "All accounts synchronized successfully!"
             if not errors
-            else f"Sync finished with {len(errors)} live API error(s)."
+            else "OAuth Setup Required to sync external Instagram, Facebook, and YouTube metrics."
         ),
     })
 
@@ -2051,15 +2259,19 @@ def get_posts():
     status = request.args.get('status')
     campaign_id = request.args.get('campaign_id')
     search = request.args.get('search', '').strip()
+    workspace_mode = _resolve_workspace_mode()
 
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
+            conn.commit()
         query = (
             'SELECT p.*, c.title as campaign_title '
-            'FROM posts p LEFT JOIN campaigns c ON p.campaign_id = c.id AND c.user_id = p.user_id '
-            'WHERE p.user_id = ?'
+            "FROM posts p LEFT JOIN campaigns c ON p.campaign_id = c.id AND c.user_id = p.user_id AND COALESCE(c.workspace_mode, 'live') = COALESCE(p.workspace_mode, 'live') "
+            "WHERE p.user_id = ? AND COALESCE(p.workspace_mode, 'live') = ?"
         )
-        params = [user_id]
+        params = [user_id, workspace_mode]
 
         if status and status != 'all':
             query += ' AND p.status = ?'
@@ -2102,9 +2314,13 @@ def create_post():
     if youtube_privacy not in ('private', 'unlisted', 'public'):
         youtube_privacy = 'private'
 
-    publish_mode = (data.get('publish_mode') or 'sandbox').strip().lower()
-    if publish_mode not in ('live', 'sandbox'):
-        publish_mode = 'sandbox'
+    workspace_mode = _resolve_workspace_mode(data)
+    if workspace_mode == 'demo':
+        publish_mode = 'demo'
+    else:
+        publish_mode = (data.get('publish_mode') or 'sandbox').strip().lower()
+        if publish_mode not in ('live', 'sandbox'):
+            publish_mode = 'sandbox'
 
     if not content:
         return jsonify({"error": "Post content is required"}), 400
@@ -2120,10 +2336,13 @@ def create_post():
 
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
+
         if campaign_id not in (None, ''):
             owned_camp = conn.execute(
-                'SELECT id FROM campaigns WHERE id = ? AND user_id = ?',
-                (campaign_id, user_id),
+                "SELECT id FROM campaigns WHERE id = ? AND user_id = ? AND COALESCE(workspace_mode, 'live') = ?",
+                (campaign_id, user_id, workspace_mode),
             ).fetchone()
             if not owned_camp:
                 return jsonify({"error": "Referenced campaign not found"}), 404
@@ -2163,27 +2382,32 @@ def create_post():
             if final_status in ('published', 'partial'):
                 published_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+        now_str = _local_now_str()
         cursor.execute(
             '''
             INSERT INTO posts (
                 user_id, campaign_id, content, platforms, media_url, media_type,
                 status, scheduled_for, likes, comments, shares, reach,
-                publish_mode, publish_results, error_message, video_title, youtube_privacy, published_at
+                publish_mode, publish_results, error_message, video_title, youtube_privacy, published_at, workspace_mode, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 user_id, campaign_id, content, json.dumps(platforms), media_url, media_type,
                 final_status, scheduled_for, initial_likes, initial_comments, initial_shares, initial_reach,
-                publish_mode, json.dumps(publish_results), error_message, video_title, youtube_privacy, published_at,
+                publish_mode, json.dumps(publish_results), error_message, video_title, youtube_privacy, published_at, workspace_mode, now_str,
             ),
         )
         post_id = cursor.lastrowid
 
         # Accurate activity log
         if final_status == 'published':
-            activity_title = "Published Live" if publish_mode == 'live' else "Published [Sandbox]"
-            activity_desc = f"Post published ({publish_mode.upper()}) to {', '.join(platforms)}."
+            if publish_mode == 'demo':
+                activity_title = "Demo Published"
+                activity_desc = f"Demo Published across {', '.join(platforms)} (simulated in Demo Mode)."
+            else:
+                activity_title = "Published Live" if publish_mode == 'live' else "Published [Sandbox]"
+                activity_desc = f"Post published ({publish_mode.upper()}) to {', '.join(platforms)}."
         elif final_status == 'partial':
             activity_title = "Partially Published Live"
             activity_desc = f"Some channels succeeded while others failed: {error_message}"
@@ -2191,19 +2415,31 @@ def create_post():
             activity_title = "Live Publish Failed"
             activity_desc = f"Publishing failed: {error_message}"
         elif final_status == 'scheduled':
-            activity_title = f"Post Scheduled ({publish_mode.upper()})"
-            activity_desc = f"Scheduled for {scheduled_for} across {', '.join(platforms)}."
+            if publish_mode == 'demo':
+                activity_title = "Demo Post Scheduled"
+                activity_desc = f"Scheduled for {scheduled_for} across {', '.join(platforms)} (Demo Mode)."
+            else:
+                activity_title = f"Post Scheduled ({publish_mode.upper()})"
+                activity_desc = f"Scheduled for {scheduled_for} across {', '.join(platforms)}."
         else:
-            activity_title = "Draft Saved"
+            activity_title = "Demo Draft Saved" if workspace_mode == 'demo' else "Draft Saved"
             activity_desc = f"New draft post created for {', '.join(platforms)}."
 
-        cursor.execute(
-            '''
-            INSERT INTO activity (user_id, type, title, description, platform)
-            VALUES (?, 'post', ?, ?, ?)
-            ''',
-            (user_id, activity_title, redact_secrets(activity_desc), platforms[0] if platforms else 'Multi-channel'),
-        )
+        primary_platform = platforms[0] if platforms else 'Multi-channel'
+        _record_activity(conn, user_id, 'post', activity_title, activity_desc, primary_platform, workspace_mode)
+
+        if workspace_mode == 'demo' and final_status == 'published' and initial_reach >= 40000:
+            prefs = conn.execute('SELECT notify_engage FROM users WHERE id = ?', (user_id,)).fetchone()
+            if not prefs or prefs['notify_engage']:
+                _record_activity(
+                    conn,
+                    user_id,
+                    'engagement',
+                    'Demo Reach Milestone',
+                    f"Simulated post reached {initial_reach:,} viewers and {initial_likes:,} likes on {', '.join(platforms)}.",
+                    primary_platform,
+                    'demo',
+                )
         conn.commit()
 
         new_post = conn.execute('SELECT * FROM posts WHERE id = ? AND user_id = ?', (post_id, user_id)).fetchone()
@@ -2221,11 +2457,17 @@ def create_post():
 def update_post(post_id):
     user_id = request.current_user['id']
     data = request.get_json() or {}
+    explicit_wmode = (data.get('workspace_mode') if isinstance(data, dict) else None) or request.args.get('workspace_mode')
+    wmode_filter = ('demo' if str(explicit_wmode).strip().lower() == 'demo' else 'live') if explicit_wmode else None
+
     conn = get_db_connection()
     try:
         existing = conn.execute('SELECT * FROM posts WHERE id = ? AND user_id = ?', (post_id, user_id)).fetchone()
         if not existing:
             return jsonify({"error": "Post not found"}), 404
+        existing_wmode = existing['workspace_mode'] if 'workspace_mode' in existing.keys() and existing['workspace_mode'] else 'live'
+        if wmode_filter and wmode_filter != existing_wmode:
+            return jsonify({"error": "Post not found in active workspace mode"}), 404
 
         content = data.get('content', existing['content'])
         platforms_list = data.get('platforms', json.loads(existing['platforms']))
@@ -2247,23 +2489,34 @@ def update_post(post_id):
         if 'campaign_id' in data:
             if campaign_id not in (None, ''):
                 owned_camp = conn.execute(
-                    'SELECT id FROM campaigns WHERE id = ? AND user_id = ?',
-                    (campaign_id, user_id),
+                    "SELECT id FROM campaigns WHERE id = ? AND user_id = ? AND COALESCE(workspace_mode, 'live') = ?",
+                    (campaign_id, user_id, existing_wmode),
                 ).fetchone()
                 if not owned_camp:
                     return jsonify({"error": "Referenced campaign not found"}), 404
             else:
                 campaign_id = None
 
-        publish_mode = data.get('publish_mode', existing['publish_mode'] if 'publish_mode' in existing.keys() else 'sandbox')
+        if existing_wmode == 'demo':
+            publish_mode = 'demo'
+        else:
+            publish_mode = str(data.get('publish_mode', existing['publish_mode'] if 'publish_mode' in existing.keys() and existing['publish_mode'] else 'sandbox')).strip().lower()
+            if publish_mode not in ('live', 'sandbox'):
+                publish_mode = 'sandbox'
         video_title = data.get('video_title', existing['video_title'] if 'video_title' in existing.keys() else None)
         youtube_privacy = data.get('youtube_privacy', existing['youtube_privacy'] if 'youtube_privacy' in existing.keys() else 'private')
 
         publish_results_json = existing['publish_results'] if 'publish_results' in existing.keys() else None
         error_message = existing['error_message'] if 'error_message' in existing.keys() else None
         final_status = requested_status
+        likes = existing['likes'] or 0
+        comments = existing['comments'] or 0
+        shares = existing['shares'] or 0
+        reach = existing['reach'] or 0
+        published_at = existing['published_at'] if 'published_at' in existing.keys() else None
 
         # If user explicitly transitions an unpublished post to 'published' via Edit, execute publishing
+        just_published = False
         if requested_status == 'published' and existing['status'] != 'published':
             outcome = _execute_post_publishing(
                 conn=conn,
@@ -2279,6 +2532,59 @@ def update_post(post_id):
             final_status = outcome['status']
             publish_results_json = json.dumps(outcome['publish_results'])
             error_message = outcome['error_message']
+            likes = outcome['likes']
+            comments = outcome['comments']
+            shares = outcome['shares']
+            reach = outcome['reach']
+            if final_status in ('published', 'partial'):
+                just_published = True
+                published_at = _local_now_str()
+                act_title = "Demo Published" if publish_mode == 'demo' else ("Published Live" if publish_mode == 'live' else "Published [Sandbox]")
+                act_desc = (
+                    f"Demo Published across {', '.join(platforms_list)} (simulated in Demo Mode)."
+                    if publish_mode == 'demo'
+                    else f"Post published ({publish_mode.upper()}) to {', '.join(platforms_list)}."
+                )
+                _record_activity(
+                    conn,
+                    user_id,
+                    'post',
+                    act_title,
+                    act_desc,
+                    platforms_list[0] if platforms_list else 'Multi-channel',
+                    existing_wmode,
+                )
+
+        if existing_wmode == 'demo' and not just_published:
+            primary_platform = platforms_list[0] if platforms_list else 'Multi-channel'
+            if final_status == 'scheduled' and (
+                scheduled_for != existing['scheduled_for'] or existing['status'] != 'scheduled'
+            ):
+                act_title = "Demo Post Rescheduled" if existing['status'] == 'scheduled' else "Demo Post Scheduled"
+                _record_activity(
+                    conn,
+                    user_id,
+                    'post',
+                    act_title,
+                    f"Scheduled for {scheduled_for} across {', '.join(platforms_list)} (Demo Mode).",
+                    primary_platform,
+                    'demo',
+                )
+            elif (
+                content != existing['content']
+                or platforms_json != existing['platforms']
+                or final_status != existing['status']
+                or campaign_id != existing['campaign_id']
+            ):
+                _record_activity(
+                    conn,
+                    user_id,
+                    'post',
+                    'Demo Post Updated',
+                    f"Updated {final_status} post across {', '.join(platforms_list)}.",
+                    primary_platform,
+                    'demo',
+                )
 
         conn.execute(
             '''
@@ -2286,14 +2592,17 @@ def update_post(post_id):
             SET content = ?, platforms = ?, media_url = ?, media_type = ?,
                 status = ?, scheduled_for = ?, campaign_id = ?,
                 publish_mode = ?, publish_results = ?, error_message = ?,
-                video_title = ?, youtube_privacy = ?
+                video_title = ?, youtube_privacy = ?,
+                likes = ?, comments = ?, shares = ?, reach = ?, published_at = ?
             WHERE id = ? AND user_id = ?
             ''',
             (
                 content, platforms_json, media_url, media_type,
                 final_status, scheduled_for, campaign_id,
                 publish_mode, publish_results_json, error_message,
-                video_title, youtube_privacy, post_id, user_id,
+                video_title, youtube_privacy,
+                likes, comments, shares, reach, published_at,
+                post_id, user_id,
             ),
         )
         conn.commit()
@@ -2310,12 +2619,38 @@ def update_post(post_id):
 @auth_required
 def delete_post(post_id):
     user_id = request.current_user['id']
+    explicit_wmode = request.args.get('workspace_mode')
+    wmode_filter = ('demo' if str(explicit_wmode).strip().lower() == 'demo' else 'live') if explicit_wmode else None
     conn = get_db_connection()
     try:
+        existing = conn.execute(
+            "SELECT id, status, platforms, COALESCE(workspace_mode, 'live') as workspace_mode FROM posts WHERE id = ? AND user_id = ?",
+            (post_id, user_id),
+        ).fetchone()
+        if not existing:
+            return jsonify({"error": "Post not found"}), 404
+        if wmode_filter and wmode_filter != existing['workspace_mode']:
+            return jsonify({"error": "Post not found in active workspace mode"}), 404
+
         cursor = conn.cursor()
         cursor.execute('DELETE FROM posts WHERE id = ? AND user_id = ?', (post_id, user_id))
-        conn.commit()
         deleted = cursor.rowcount > 0
+        if deleted and existing['workspace_mode'] == 'demo':
+            try:
+                plats = json.loads(existing['platforms'])
+            except Exception:
+                plats = [existing['platforms']] if existing['platforms'] else []
+            primary_plat = plats[0] if isinstance(plats, list) and plats else 'Multi-channel'
+            _record_activity(
+                conn,
+                user_id,
+                'post',
+                'Demo Post Deleted',
+                f"Removed {existing['status']} post from Demo Mode.",
+                primary_plat,
+                'demo',
+            )
+        conn.commit()
     finally:
         conn.close()
 
@@ -2328,11 +2663,15 @@ def delete_post(post_id):
 @auth_required
 def get_campaigns():
     user_id = request.current_user['id']
+    workspace_mode = _resolve_workspace_mode()
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
+            conn.commit()
         campaigns = conn.execute(
-            'SELECT * FROM campaigns WHERE user_id = ? ORDER BY id DESC',
-            (user_id,),
+            "SELECT * FROM campaigns WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? ORDER BY id DESC",
+            (user_id, workspace_mode),
         ).fetchall()
 
         result = []
@@ -2342,18 +2681,23 @@ def get_campaigns():
                 '''
                 SELECT COALESCE(SUM(reach), 0) as post_reach, COUNT(*) as post_count
                 FROM posts
-                WHERE campaign_id = ? AND user_id = ? AND status = 'published'
+                WHERE campaign_id = ? AND user_id = ? AND status = 'published' AND COALESCE(workspace_mode, 'live') = ?
                 ''',
-                (item['id'], user_id),
+                (item['id'], user_id, workspace_mode),
             ).fetchone()
 
-            calc_reach = stats['post_reach'] if stats and stats['post_reach'] > 0 else item['current_reach']
+            raw_post_reach = int(stats['post_reach'] or 0) if stats else 0
+            if workspace_mode == 'demo':
+                calc_reach = raw_post_reach
+            else:
+                calc_reach = raw_post_reach if raw_post_reach > 0 else item['current_reach']
             target = item['target_reach'] or 50000
             progress = min(100, int((calc_reach / target) * 100)) if target > 0 else 0
 
             item['current_reach'] = calc_reach
             item['progress'] = progress
             item['linked_posts_count'] = stats['post_count'] if stats else 0
+            item['workspace_mode'] = item.get('workspace_mode') or workspace_mode
             result.append(item)
     finally:
         conn.close()
@@ -2365,6 +2709,7 @@ def get_campaigns():
 def create_campaign():
     user_id = request.current_user['id']
     data = request.get_json() or {}
+    workspace_mode = _resolve_workspace_mode(data)
     title = data.get('title', '').strip()
     description = data.get('description', '').strip()
     budget = str(data.get('budget', '$1,000')).strip()
@@ -2382,17 +2727,24 @@ def create_campaign():
 
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
         cursor = conn.cursor()
         cursor.execute('''
-        INSERT INTO campaigns (user_id, title, description, status, progress, target_reach, current_reach, budget, start_date, end_date)
-        VALUES (?, ?, ?, 'active', 0, ?, 0, ?, ?, ?)
-        ''', (user_id, title, description, target_reach, budget, start_date, end_date))
+        INSERT INTO campaigns (user_id, title, description, status, progress, target_reach, current_reach, budget, start_date, end_date, workspace_mode)
+        VALUES (?, ?, ?, 'active', 0, ?, 0, ?, ?, ?, ?)
+        ''', (user_id, title, description, target_reach, budget, start_date, end_date, workspace_mode))
         camp_id = cursor.lastrowid
 
-        cursor.execute('''
-        INSERT INTO activity (user_id, type, title, description, platform)
-        VALUES (?, 'campaign', 'Campaign Launched', ?, 'Campaigns')
-        ''', (user_id, f"Initiated '{title}' targeted reach {target_reach:,}."))
+        _record_activity(
+            conn,
+            user_id,
+            'campaign',
+            'Demo Campaign Created' if workspace_mode == 'demo' else 'Campaign Launched',
+            f"Initiated '{title}' targeted reach {target_reach:,}.",
+            'Campaigns',
+            workspace_mode,
+        )
         conn.commit()
 
         new_camp = conn.execute('SELECT * FROM campaigns WHERE id = ? AND user_id = ?', (camp_id, user_id)).fetchone()
@@ -2405,11 +2757,17 @@ def create_campaign():
 def update_campaign(camp_id):
     user_id = request.current_user['id']
     data = request.get_json() or {}
+    explicit_wmode = (data.get('workspace_mode') if isinstance(data, dict) else None) or request.args.get('workspace_mode')
+    wmode_filter = ('demo' if str(explicit_wmode).strip().lower() == 'demo' else 'live') if explicit_wmode else None
+
     conn = get_db_connection()
     try:
         existing = conn.execute('SELECT * FROM campaigns WHERE id = ? AND user_id = ?', (camp_id, user_id)).fetchone()
         if not existing:
             return jsonify({"error": "Campaign not found"}), 404
+        existing_wmode = existing['workspace_mode'] if 'workspace_mode' in existing.keys() and existing['workspace_mode'] else 'live'
+        if wmode_filter and wmode_filter != existing_wmode:
+            return jsonify({"error": "Campaign not found in active workspace mode"}), 404
 
         title = data.get('title', existing['title']).strip()
         description = data.get('description', existing['description']).strip()
@@ -2418,6 +2776,8 @@ def update_campaign(camp_id):
             target_reach = int(data.get('target_reach', existing['target_reach']))
         except (TypeError, ValueError):
             return jsonify({"error": "target_reach must be a valid integer"}), 400
+        if target_reach <= 0:
+            return jsonify({"error": "target_reach must be positive"}), 400
         status = data.get('status', existing['status']).strip()
         end_date = data.get('end_date', existing['end_date'])
 
@@ -2426,6 +2786,16 @@ def update_campaign(camp_id):
         SET title = ?, description = ?, budget = ?, target_reach = ?, status = ?, end_date = ?
         WHERE id = ? AND user_id = ?
         ''', (title, description, budget, target_reach, status, end_date, camp_id, user_id))
+        if existing_wmode == 'demo':
+            _record_activity(
+                conn,
+                user_id,
+                'campaign',
+                'Demo Campaign Updated',
+                f"Updated '{title}' ({status}, target reach {target_reach:,}).",
+                'Campaigns',
+                'demo',
+            )
         conn.commit()
 
         updated = conn.execute('SELECT * FROM campaigns WHERE id = ? AND user_id = ?', (camp_id, user_id)).fetchone()
@@ -2437,13 +2807,36 @@ def update_campaign(camp_id):
 @auth_required
 def delete_campaign(camp_id):
     user_id = request.current_user['id']
+    explicit_wmode = request.args.get('workspace_mode')
+    wmode_filter = ('demo' if str(explicit_wmode).strip().lower() == 'demo' else 'live') if explicit_wmode else None
+
     conn = get_db_connection()
     try:
+        existing = conn.execute('SELECT id, title, workspace_mode FROM campaigns WHERE id = ? AND user_id = ?', (camp_id, user_id)).fetchone()
+        if not existing:
+            return jsonify({"error": "Campaign not found"}), 404
+        existing_wmode = existing['workspace_mode'] if 'workspace_mode' in existing.keys() and existing['workspace_mode'] else 'live'
+        if wmode_filter and wmode_filter != existing_wmode:
+            return jsonify({"error": "Campaign not found in active workspace mode"}), 404
+
         cursor = conn.cursor()
-        cursor.execute('UPDATE posts SET campaign_id = NULL WHERE campaign_id = ? AND user_id = ?', (camp_id, user_id))
+        cursor.execute(
+            "UPDATE posts SET campaign_id = NULL WHERE campaign_id = ? AND user_id = ? AND COALESCE(workspace_mode, 'live') = ?",
+            (camp_id, user_id, existing_wmode),
+        )
         cursor.execute('DELETE FROM campaigns WHERE id = ? AND user_id = ?', (camp_id, user_id))
-        conn.commit()
         deleted = cursor.rowcount > 0
+        if deleted and existing_wmode == 'demo':
+            _record_activity(
+                conn,
+                user_id,
+                'campaign',
+                'Demo Campaign Deleted',
+                f"Deleted campaign '{existing['title']}' from Demo Mode.",
+                'Campaigns',
+                'demo',
+            )
+        conn.commit()
     finally:
         conn.close()
 
@@ -2457,64 +2850,145 @@ def delete_campaign(camp_id):
 def get_analytics():
     user_id = request.current_user['id']
     range_filter = request.args.get('range', '7d').lower() # '7d', '30d', '3m', '1y'
+    workspace_mode = _resolve_workspace_mode()
 
     conn = get_db_connection()
     try:
-        ensure_user_social_accounts(conn, user_id)
-        accounts = conn.execute('SELECT * FROM social_accounts WHERE user_id = ? ORDER BY id ASC', (user_id,)).fetchall()
+        _ensure_workspace(conn, user_id, workspace_mode)
+        conn.commit()
+        accounts = conn.execute(
+            "SELECT * FROM social_accounts WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? ORDER BY id ASC",
+            (user_id, workspace_mode),
+        ).fetchall()
         total_followers = sum(a['followers'] for a in accounts)
         total_following = sum(a['following'] for a in accounts)
 
         posts_stats = conn.execute('''
         SELECT
             COUNT(*) as total_posts,
+            SUM(CASE WHEN status IN ('published', 'partial') THEN 1 ELSE 0 END) as published_count,
             COALESCE(SUM(likes), 0) as total_likes,
             COALESCE(SUM(comments), 0) as total_comments,
             COALESCE(SUM(shares), 0) as total_shares,
             COALESCE(SUM(reach), 0) as total_reach
         FROM posts
-        WHERE user_id = ?
-        ''', (user_id,)).fetchone()
+        WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ?
+        ''', (user_id, workspace_mode)).fetchone()
 
         total_posts = posts_stats['total_posts'] or 0
+        published_count = posts_stats['published_count'] or 0
         total_likes = posts_stats['total_likes'] or 0
         total_reach = posts_stats['total_reach'] or 0
         total_interactions = total_likes + (posts_stats['total_comments'] or 0) + (posts_stats['total_shares'] or 0)
 
+        eng_pct = round((total_interactions / total_reach) * 100, 1) if total_reach > 0 and total_interactions > 0 else 0.0
+        if total_interactions > 0 and eng_pct == 0.0:
+            eng_pct = 0.1
+
         history = []
-        if range_filter == '30d':
-            for i in range(1, 31, 3):
+        if workspace_mode == 'demo' and range_filter == '7d':
+            today = datetime.now().date()
+            day_dates = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
+            iso_dates = [dt.strftime('%Y-%m-%d') for dt in day_dates]
+            daily_reach_map = {iso: 0 for iso in iso_dates}
+            daily_eng_map = {iso: 0 for iso in iso_dates}
+            daily_posts_map = {iso: 0 for iso in iso_dates}
+
+            demo_posts = conn.execute(
+                '''
+                SELECT reach, likes, comments, shares, SUBSTR(COALESCE(published_at, created_at), 1, 10) as post_date
+                FROM posts
+                WHERE user_id = ? AND workspace_mode = 'demo' AND status IN ('published', 'partial')
+                ''',
+                (user_id,),
+            ).fetchall()
+
+            window_reach_sum = 0
+            for dp in demo_posts:
+                p_date = dp['post_date'] or ''
+                p_reach = int(dp['reach'] or 0)
+                p_interactions = int(dp['likes'] or 0) + int(dp['comments'] or 0) + int(dp['shares'] or 0)
+                if p_date in daily_reach_map:
+                    daily_reach_map[p_date] += p_reach
+                    daily_eng_map[p_date] += p_interactions
+                    daily_posts_map[p_date] += 1
+                    window_reach_sum += p_reach
+
+            older_reach = max(0, total_reach - window_reach_sum)
+            if older_reach > 0:
+                tail_weights = [0.11, 0.13, 0.12, 0.15, 0.17, 0.15, 0.17]
+                allocated = 0
+                for idx, iso in enumerate(iso_dates):
+                    share = (older_reach - allocated) if idx == len(iso_dates) - 1 else int(round(older_reach * tail_weights[idx]))
+                    daily_reach_map[iso] += share
+                    allocated += share
+
+            for dt, iso in zip(day_dates, iso_dates):
+                day_reach = daily_reach_map[iso]
+                day_eng = daily_eng_map[iso]
+                if day_reach > 0 and day_eng > 0:
+                    eng_rate = round((day_eng / day_reach) * 100, 1)
+                elif day_reach > 0:
+                    eng_rate = eng_pct
+                else:
+                    eng_rate = 0.0
                 history.append({
-                    "day": f"Day {i}",
-                    "impressions": int(total_reach * 0.03) + (i * 1200 if total_reach > 0 else 0),
-                    "reach": int(total_reach * 0.02) + (i * 900 if total_reach > 0 else 0),
-                    "engagement": round(5.0 + (i * 0.08), 1) if total_reach > 0 else 0.0
-                })
-        elif range_filter == '3m':
-            for i in range(1, 13):
-                history.append({
-                    "day": f"Wk {i}",
-                    "impressions": int(total_reach * 0.08) + (i * 4500 if total_reach > 0 else 0),
-                    "reach": int(total_reach * 0.06) + (i * 3200 if total_reach > 0 else 0),
-                    "engagement": round(5.2 + (i * 0.12), 1) if total_reach > 0 else 0.0
-                })
-        elif range_filter == '1y':
-            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            for m in months:
-                history.append({
-                    "day": m,
-                    "impressions": int(total_reach * 0.15) + (len(m) * 12000 if total_reach > 0 else 0),
-                    "reach": int(total_reach * 0.12) + (len(m) * 8500 if total_reach > 0 else 0),
-                    "engagement": round(5.8 + (len(m) * 0.15), 1) if total_reach > 0 else 0.0
+                    "day": f"{dt.strftime('%b')} {dt.day}",
+                    "date": iso,
+                    "full_date": f"{dt.strftime('%a, %b')} {dt.day}, {dt.year}",
+                    "impressions": int(round(day_reach * 1.32)) if day_reach > 0 else 0,
+                    "reach": day_reach,
+                    "engagement": eng_rate,
+                    "posts_count": daily_posts_map[iso],
                 })
         else:
-            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            for idx, d in enumerate(days):
+            range_configs = {
+                '30d': (
+                    [f"Day {i}" for i in range(1, 31, 3)],
+                    [0.76, 0.84, 0.92, 0.88, 1.04, 1.12, 1.06, 1.18, 1.15, 1.26],
+                    3.0,
+                    1.38,
+                ),
+                '3m': (
+                    [f"Wk {i}" for i in range(1, 13)],
+                    [0.68, 0.74, 0.79, 0.85, 0.83, 0.92, 0.97, 1.05, 1.02, 1.12, 1.18, 1.24],
+                    6.2,
+                    1.40,
+                ),
+                '1y': (
+                    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+                    [0.58, 0.63, 0.71, 0.69, 0.78, 0.86, 0.84, 0.95, 1.03, 1.09, 1.16, 1.22],
+                    18.0,
+                    1.42,
+                ),
+            }
+            labels, weights, scale, imp_mult = range_configs.get(
+                range_filter,
+                (
+                    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                    [0.74, 0.92, 0.86, 1.08, 1.19, 1.06, 1.15],
+                    1.0,
+                    1.35,
+                ),
+            )
+            eng_offsets = [-0.4, 0.2, -0.1, 0.4, 0.6, 0.1, 0.3, -0.2, 0.5, 0.2, 0.4, 0.5]
+            base_daily_reach = total_reach / 7.0 if total_reach > 0 else 0.0
+
+            for idx, label in enumerate(labels):
+                if total_reach > 0:
+                    w = weights[idx % len(weights)]
+                    day_reach = max(1, int(round(base_daily_reach * scale * w)))
+                    day_impressions = int(round(day_reach * (imp_mult + (0.04 if idx % 2 else 0.0))))
+                    day_eng = round(max(0.5, eng_pct + eng_offsets[idx % len(eng_offsets)]), 1)
+                else:
+                    day_reach = 0
+                    day_impressions = 0
+                    day_eng = 0.0
                 history.append({
-                    "day": d,
-                    "impressions": (125000 + (idx * 15000)) if total_reach > 0 else 0,
-                    "reach": (98000 + (idx * 12000)) if total_reach > 0 else 0,
-                    "engagement": round(4.8 + (idx * 0.4), 1) if total_reach > 0 else 0.0
+                    "day": label,
+                    "impressions": day_impressions,
+                    "reach": day_reach,
+                    "engagement": day_eng,
                 })
 
         platform_distribution = []
@@ -2540,58 +3014,66 @@ def get_analytics():
         SELECT
             SUM(CASE WHEN publish_mode = 'live' AND status IN ('published', 'partial') THEN 1 ELSE 0 END) as live_posts,
             SUM(CASE WHEN COALESCE(publish_mode, 'sandbox') != 'live' AND status = 'published' THEN 1 ELSE 0 END) as sandbox_posts,
+            SUM(CASE WHEN publish_mode = 'demo' AND status = 'published' THEN 1 ELSE 0 END) as demo_posts,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_posts
         FROM posts
-        WHERE user_id = ?
-        ''', (user_id,)).fetchone()
-
-        live_snapshots = conn.execute('''
-        SELECT s.*
-        FROM analytics_snapshots s
-        INNER JOIN (
-            SELECT platform, MAX(id) as max_id
-            FROM analytics_snapshots
-            WHERE user_id = ? AND source_mode = 'live'
-            GROUP BY platform
-        ) latest ON s.id = latest.max_id
-        WHERE s.user_id = ?
-        ORDER BY s.platform ASC
-        ''', (user_id, user_id)).fetchall()
-
-        active_oauth = conn.execute(
-            'SELECT platform, account_name, handle, last_error, updated_at, expires_at FROM oauth_connections WHERE user_id = ? AND connected = 1',
-            (user_id,),
-        ).fetchall()
+        WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ?
+        ''', (user_id, workspace_mode)).fetchone()
 
         live_platforms = []
-        for snap in live_snapshots:
-            item = dict(snap)
-            try:
-                item['details'] = json.loads(item.get('metrics_json') or '{}')
-            except Exception:
-                item['details'] = {}
-            item.pop('metrics_json', None)
-            live_platforms.append(item)
-
         conn_list = []
-        for oa in active_oauth:
-            oa_dict = dict(oa)
-            if oa_dict.get('last_error'):
-                oa_dict['last_error'] = redact_secrets(oa_dict['last_error'])
-            conn_list.append(oa_dict)
+        if workspace_mode == 'live':
+            live_snapshots = conn.execute('''
+            SELECT s.*
+            FROM analytics_snapshots s
+            INNER JOIN (
+                SELECT platform, MAX(id) as max_id
+                FROM analytics_snapshots
+                WHERE user_id = ? AND source_mode = 'live'
+                GROUP BY platform
+            ) latest ON s.id = latest.max_id
+            WHERE s.user_id = ?
+            ORDER BY s.platform ASC
+            ''', (user_id, user_id)).fetchall()
+
+            active_oauth = conn.execute(
+                'SELECT platform, account_name, handle, last_error, updated_at, expires_at FROM oauth_connections WHERE user_id = ? AND connected = 1',
+                (user_id,),
+            ).fetchall()
+
+            for snap in live_snapshots:
+                item = dict(snap)
+                try:
+                    item['details'] = json.loads(item.get('metrics_json') or '{}')
+                except Exception:
+                    item['details'] = {}
+                item.pop('metrics_json', None)
+                live_platforms.append(item)
+
+            for oa in active_oauth:
+                oa_dict = dict(oa)
+                if oa_dict.get('last_error'):
+                    oa_dict['last_error'] = redact_secrets(oa_dict['last_error'])
+                conn_list.append(oa_dict)
     finally:
         conn.close()
 
     return jsonify({
+        "workspace_mode": workspace_mode,
         "summary": {
             "total_followers": total_followers,
             "total_following": total_following,
-            "weekly_growth": "+14.8%" if total_followers > 0 else "0.0%",
+            "weekly_growth": (
+                f"+{min(48.5, round(8.2 + (published_count * 2.4) + (eng_pct * 0.3), 1))}%"
+                if total_followers > 0
+                else "0.0%"
+            ),
             "total_posts": total_posts,
+            "published_posts": published_count,
             "total_likes": total_likes,
             "total_reach": total_reach,
             "total_interactions": total_interactions,
-            "engagement_rate": "6.4%" if total_interactions > 0 else "0.0%",
+            "engagement_rate": f"{eng_pct}%" if total_interactions > 0 else "0.0%",
             "range": range_filter
         },
         "history": history,
@@ -2599,8 +3081,11 @@ def get_analytics():
         "live_analytics": {
             "connected_live_accounts": conn_list,
             "snapshots": live_platforms,
+            "oauth_required": (workspace_mode == 'live' and len(conn_list) == 0),
+            "demo_mode": (workspace_mode == 'demo'),
             "live_posts_count": int(mode_counts['live_posts'] or 0) if mode_counts else 0,
             "sandbox_posts_count": int(mode_counts['sandbox_posts'] or 0) if mode_counts else 0,
+            "demo_posts_count": int(mode_counts['demo_posts'] or 0) if mode_counts else 0,
             "failed_posts_count": int(mode_counts['failed_posts'] or 0) if mode_counts else 0,
         }
     })
@@ -2610,11 +3095,15 @@ def get_analytics():
 @auth_required
 def get_activity():
     user_id = request.current_user['id']
+    workspace_mode = _resolve_workspace_mode()
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
+            conn.commit()
         activities = conn.execute(
-            'SELECT * FROM activity WHERE user_id = ? ORDER BY id DESC LIMIT 15',
-            (user_id,),
+            "SELECT * FROM activity WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? ORDER BY id DESC LIMIT 15",
+            (user_id, workspace_mode),
         ).fetchall()
     finally:
         conn.close()
@@ -2628,31 +3117,38 @@ def global_search():
     q = request.args.get('q', '').strip()
     if not q:
         return jsonify({"posts": [], "accounts": [], "campaigns": []})
+    workspace_mode = _resolve_workspace_mode()
 
     conn = get_db_connection()
     try:
+        if workspace_mode == 'demo':
+            _ensure_workspace(conn, user_id, workspace_mode)
+            conn.commit()
         like_q = f'%{q}%'
 
         posts = conn.execute('''
-        SELECT id, content, platforms, status, scheduled_for, created_at
+        SELECT id, content, platforms, status, publish_mode, workspace_mode, scheduled_for, created_at
         FROM posts
-        WHERE user_id = ? AND (content LIKE ? OR platforms LIKE ?)
+        WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? AND (content LIKE ? OR platforms LIKE ?)
+        ORDER BY id DESC
         LIMIT 6
-        ''', (user_id, like_q, like_q)).fetchall()
+        ''', (user_id, workspace_mode, like_q, like_q)).fetchall()
 
         accounts = conn.execute('''
-        SELECT id, platform, name, handle, followers, connected
+        SELECT id, platform, name, handle, followers, connected, mode, workspace_mode
         FROM social_accounts
-        WHERE user_id = ? AND (name LIKE ? OR handle LIKE ? OR platform LIKE ?)
+        WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? AND (name LIKE ? OR handle LIKE ? OR platform LIKE ?)
+        ORDER BY connected DESC, id ASC
         LIMIT 6
-        ''', (user_id, like_q, like_q, like_q)).fetchall()
+        ''', (user_id, workspace_mode, like_q, like_q, like_q)).fetchall()
 
         campaigns = conn.execute('''
-        SELECT id, title, description, status, progress, budget
+        SELECT id, title, description, status, progress, budget, workspace_mode
         FROM campaigns
-        WHERE user_id = ? AND (title LIKE ? OR description LIKE ?)
+        WHERE user_id = ? AND COALESCE(workspace_mode, 'live') = ? AND (title LIKE ? OR description LIKE ?)
+        ORDER BY id DESC
         LIMIT 6
-        ''', (user_id, like_q, like_q)).fetchall()
+        ''', (user_id, workspace_mode, like_q, like_q)).fetchall()
     finally:
         conn.close()
 

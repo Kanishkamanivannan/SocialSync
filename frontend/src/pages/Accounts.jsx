@@ -8,19 +8,21 @@ import {
   TrendingUp,
   Radio,
   Activity,
-  Link2,
   Unlink,
   ShieldCheck,
   ShieldAlert,
-  ExternalLink,
+  FlaskConical,
+  KeyRound,
   X as CloseIcon
 } from 'lucide-react';
-import { api, isSafeHttpUrl, isTrustedOAuthUrl } from '../services/api';
+import { api, isSafeHttpUrl } from '../services/api';
 
 const OFFICIAL_PLATFORMS = ['Instagram', 'Facebook', 'YouTube'];
 
 export default function Accounts({
   accounts = [],
+  appMode = 'demo',
+  backendStatus = 'connected',
   onAccountUpdated,
   onAccountsSynced,
   onRefreshData,
@@ -33,9 +35,9 @@ export default function Accounts({
   const [oauthBusyPlatform, setOauthBusyPlatform] = useState(null);
   const [switchingPage, setSwitchingPage] = useState(false);
   const [feedback, setFeedback] = useState(null);
-  const [oauthConfig, setOauthConfig] = useState(null);
   const [metaPages, setMetaPages] = useState([]);
-  const [setupGuidePlatform, setSetupGuidePlatform] = useState(null);
+
+  const isDemoMode = appMode === 'demo';
 
   const platformIcons = {
     Instagram: '📸',
@@ -47,15 +49,10 @@ export default function Accounts({
   };
 
   const loadOAuthDetails = useCallback(async () => {
-    try {
-      const statusRes = await api.getOAuthStatus();
-      if (statusRes?.providers) {
-        setOauthConfig(statusRes);
-      }
-    } catch {
-      // Non-fatal: OAuth status endpoint optional if offline
+    if (isDemoMode) {
+      setMetaPages([]);
+      return;
     }
-
     try {
       const pagesRes = await api.getMetaPages();
       if (Array.isArray(pagesRes?.pages)) {
@@ -64,19 +61,12 @@ export default function Accounts({
     } catch {
       setMetaPages([]);
     }
-  }, []);
+  }, [isDemoMode]);
 
   useEffect(() => {
+    if (isDemoMode) return undefined;
     let active = true;
     const init = async () => {
-      try {
-        const statusRes = await api.getOAuthStatus();
-        if (active && statusRes?.providers) {
-          setOauthConfig(statusRes);
-        }
-      } catch {
-        // Ignore network error here
-      }
       try {
         const pagesRes = await api.getMetaPages();
         if (active && Array.isArray(pagesRes?.pages)) {
@@ -90,19 +80,18 @@ export default function Accounts({
     return () => {
       active = false;
     };
-  }, [accounts.length, oauthNotice]);
+  }, [accounts.length, oauthNotice, isDemoMode]);
 
-  // Deduplicate accounts to guarantee each platform is displayed only once
   const uniqueAccounts = accounts.reduce((acc, current) => {
-    const exists = acc.find(item => item.platform.toLowerCase() === current.platform.toLowerCase());
+    const exists = acc.find((item) => item.platform.toLowerCase() === current.platform.toLowerCase());
     if (!exists) {
       return acc.concat([current]);
     }
     return acc;
   }, []);
 
-  const officialAccounts = uniqueAccounts.filter(a => OFFICIAL_PLATFORMS.includes(a.platform));
-  const sandboxOnlyAccounts = uniqueAccounts.filter(a => !OFFICIAL_PLATFORMS.includes(a.platform));
+  const officialAccounts = uniqueAccounts.filter((a) => OFFICIAL_PLATFORMS.includes(a.platform));
+  const sandboxOnlyAccounts = uniqueAccounts.filter((a) => !OFFICIAL_PLATFORMS.includes(a.platform));
 
   const showTempFeedback = (type, text) => {
     setFeedback({ type, text });
@@ -112,11 +101,11 @@ export default function Accounts({
   const handleToggle = async (accId) => {
     setTogglingId(accId);
     try {
-      const updated = await api.toggleAccount(accId);
+      const updated = await api.toggleAccount(accId, appMode);
       if (onAccountUpdated) onAccountUpdated(updated);
       showTempFeedback(
         'success',
-        `${updated.name || updated.platform} has been ${updated.connected ? 'enabled' : 'paused'} for publishing.`
+        `${updated.name || updated.platform} has been ${updated.connected ? 'enabled' : 'paused'} (${isDemoMode ? 'Demo Mode' : 'Live Server Mode'}).`
       );
     } catch (err) {
       console.error('Error toggling account connection:', err);
@@ -129,17 +118,17 @@ export default function Accounts({
   const handleSyncSingle = async (acc) => {
     setSyncingId(acc.id);
     try {
-      const res = await api.syncAccount(acc.id);
+      const res = await api.syncAccount(acc.id, appMode);
       if (res?.account && onAccountUpdated) {
         onAccountUpdated(res.account);
       }
-      if (onRefreshData) onRefreshData();
+      if (onRefreshData) onRefreshData(appMode);
       showTempFeedback('success', res.message || `${acc.platform} synchronized successfully.`);
     } catch (err) {
       if (err.data?.account && onAccountUpdated) {
         onAccountUpdated(err.data.account);
       }
-      showTempFeedback('error', err.message || `Failed to sync ${acc.platform}.`);
+      showTempFeedback('error', err.message || `OAuth Setup Required — failed to sync ${acc.platform}.`);
     } finally {
       setSyncingId(null);
     }
@@ -148,7 +137,7 @@ export default function Accounts({
   const handleSyncAll = async () => {
     setGlobalSyncing(true);
     try {
-      const res = await api.syncAllAccounts();
+      const res = await api.syncAllAccounts(appMode);
       if (onAccountsSynced) onAccountsSynced(res);
       await loadOAuthDetails();
       if (res.errors && res.errors.length > 0) {
@@ -165,57 +154,18 @@ export default function Accounts({
     }
   };
 
-  const handleOAuthConnect = async (platform, method = null) => {
-    const providerKey = platform.toLowerCase();
-    setOauthBusyPlatform(platform);
-    setSetupGuidePlatform(null);
-    try {
-      const res = await api.startOAuth(providerKey, method);
-      if (!res?.auth_url || !isTrustedOAuthUrl(res.auth_url)) {
-        throw new Error('Untrusted or missing OAuth authorization URL returned by backend.');
-      }
-
-      const width = 640;
-      const height = 740;
-      const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
-      const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
-      const popup = window.open(
-        res.auth_url,
-        `socialsync_oauth_${providerKey}`,
-        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
-      );
-
-      if (!popup) {
-        // Fallback when popups are blocked: full-page OAuth redirect
-        window.location.assign(res.auth_url);
-        return;
-      }
-
-      showTempFeedback(
-        'success',
-        `Opened official ${platform} OAuth authorization window. Complete sign-in in the popup to connect your real account.`
-      );
-    } catch (err) {
-      const missing = err.data?.missing_env || [];
-      if (missing.length > 0) {
-        setSetupGuidePlatform({
-          platform,
-          missingEnv: missing,
-          error: err.message,
-          providerConfig: oauthConfig?.providers?.[platform]
-        });
-      }
-      showTempFeedback('error', err.message || `Could not start ${platform} OAuth flow.`);
-    } finally {
-      setOauthBusyPlatform(null);
-    }
+  const handleOAuthNotConfigured = (platform) => {
+    showTempFeedback(
+      'error',
+      `OAuth Setup Required — Official ${platform} OAuth app credentials are not configured in this release.`
+    );
   };
 
   const handleDisconnectOAuth = async (platform) => {
     setOauthBusyPlatform(platform);
     try {
       const res = await api.disconnectOAuth(platform.toLowerCase());
-      if (onRefreshData) await onRefreshData();
+      if (onRefreshData) await onRefreshData(appMode);
       await loadOAuthDetails();
       showTempFeedback('success', res.message || `Disconnected ${platform} OAuth session.`);
     } catch (err) {
@@ -230,7 +180,7 @@ export default function Accounts({
     setSwitchingPage(true);
     try {
       const res = await api.selectMetaPage(pageId);
-      if (onRefreshData) await onRefreshData();
+      if (onRefreshData) await onRefreshData(appMode);
       await loadOAuthDetails();
       showTempFeedback('success', res.message || 'Active Facebook Page updated.');
     } catch (err) {
@@ -244,40 +194,37 @@ export default function Accounts({
     const isToggling = togglingId === acc.id;
     const isSyncing = syncingId === acc.id;
     const isOAuthBusy = oauthBusyPlatform === acc.platform;
-    const isLiveOAuth = Boolean(acc.oauth_connected);
-    const providerCfg = oauthConfig?.providers?.[acc.platform];
-    const oauthReadyOnServer = Boolean(providerCfg?.configured);
-    const missingEnv = acc.missing_env?.length ? acc.missing_env : (providerCfg?.missing_env || []);
-    const activeMetaPage = metaPages.find(p => p.active);
+    const isLiveOAuth = !isDemoMode && Boolean(acc.oauth_connected);
+    const activeMetaPage = metaPages.find((p) => p.active);
 
     return (
       <div
         key={acc.id}
-        className="clean-card"
+        className="clean-card ss-card-interactive"
         style={{
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
-          gap: '1.1rem',
+          gap: '1.05rem',
           padding: '1.45rem',
-          border: isLiveOAuth ? '1px solid rgba(16, 185, 129, 0.35)' : undefined
+          borderColor: isLiveOAuth ? 'var(--success-border)' : isDemoMode && acc.connected ? 'var(--lavender-border)' : undefined
         }}
       >
-        {/* Top Header */}
+        {/* Card Header */}
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', minWidth: 0 }}>
-            <div style={{
-              width: '48px',
-              height: '48px',
-              borderRadius: 'var(--radius-lg)',
-              backgroundColor: 'var(--lavender)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '1.5rem',
-              flexShrink: 0,
-              overflow: 'hidden'
-            }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', minWidth: 0 }}>
+            <div
+              className="ss-icon-badge"
+              style={{
+                width: '48px',
+                height: '48px',
+                borderRadius: '14px',
+                backgroundColor: 'var(--lavender)',
+                border: '1px solid var(--lavender-border)',
+                fontSize: '1.45rem',
+                overflow: 'hidden'
+              }}
+            >
               {isSafeHttpUrl(acc.avatar) ? (
                 <img src={acc.avatar} alt={acc.name || acc.platform} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
@@ -285,31 +232,50 @@ export default function Accounts({
               )}
             </div>
             <div style={{ minWidth: 0 }}>
-              <h3 style={{ fontSize: '1.08rem', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
-                {acc.platform}
-              </h3>
-              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <h3 style={{ fontSize: '1.06rem', fontWeight: 700, margin: 0 }}>{acc.platform}</h3>
+              <div
+                style={{
+                  fontSize: '0.8rem',
+                  color: 'var(--text-secondary)',
+                  fontWeight: 500,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  marginTop: '2px'
+                }}
+              >
                 {acc.name && acc.name !== acc.platform ? `${acc.name} (${acc.handle})` : acc.handle}
               </div>
             </div>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', flexShrink: 0 }}>
-            <span className={`badge ${acc.connected ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '0.72rem' }}>
-              <Radio size={10} style={{ marginRight: '4px' }} />
-              {acc.connected ? 'Enabled' : 'Paused'}
+            <span className={`badge ${acc.connected ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '0.7rem' }}>
+              <Radio size={10} />
+              <span>{isDemoMode ? (acc.connected ? 'Demo Connected' : 'Paused') : acc.connected ? 'Enabled' : 'Paused'}</span>
             </span>
             <span
               style={{
-                fontSize: '0.68rem',
-                color: isLiveOAuth ? 'var(--success)' : (isOfficialPlatform ? 'var(--warning)' : 'var(--text-muted)'),
+                fontSize: '0.69rem',
+                color: isDemoMode
+                  ? 'var(--primary)'
+                  : isLiveOAuth
+                  ? 'var(--success)'
+                  : isOfficialPlatform
+                  ? 'var(--warning)'
+                  : 'var(--text-muted)',
                 fontWeight: 700,
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '4px'
               }}
             >
-              {isLiveOAuth ? (
+              {isDemoMode ? (
+                <>
+                  <FlaskConical size={12} />
+                  Demo (Simulated)
+                </>
+              ) : isLiveOAuth ? (
                 <>
                   <ShieldCheck size={12} />
                   Live OAuth API
@@ -317,88 +283,93 @@ export default function Accounts({
               ) : isOfficialPlatform ? (
                 <>
                   <ShieldAlert size={12} />
-                  {oauthReadyOnServer ? 'OAuth Not Linked' : 'Sandbox (Creds Missing)'}
+                  OAuth Setup Required
                 </>
               ) : (
-                '○ Sandbox Only'
+                'Not Connected (No OAuth)'
               )}
             </span>
           </div>
         </div>
 
-        {/* Metrics Box */}
-        <div style={{
-          backgroundColor: 'var(--bg-muted)',
-          borderRadius: 'var(--radius-md)',
-          padding: '0.85rem 1.05rem',
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: '0.75rem'
-        }}>
+        {/* Channel Metrics */}
+        <div
+          style={{
+            backgroundColor: 'var(--bg-muted)',
+            borderRadius: '12px',
+            border: '1px solid var(--border-light)',
+            padding: '0.85rem 1rem',
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '0.75rem'
+          }}
+        >
           <div>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '2px' }}>
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
               <Users size={12} color="var(--primary)" />
               {acc.platform === 'YouTube' ? 'Subscribers' : 'Followers'}
             </span>
-            <span style={{ fontSize: '1.22rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.22rem', fontWeight: 800 }}>
               {(acc.followers || 0).toLocaleString()}
             </span>
           </div>
           <div>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '2px' }}>
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
               <TrendingUp size={12} color="var(--success)" />
-              {isLiveOAuth ? 'Live Growth / Delta' : 'Demo Growth'}
+              {isDemoMode ? 'Demo Growth' : isLiveOAuth ? 'Live Growth' : 'Server Growth'}
             </span>
-            <span style={{ fontSize: '1.22rem', fontWeight: 800, color: 'var(--success)' }}>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.22rem', fontWeight: 800, color: 'var(--success)' }}>
               {acc.growth || '+0.0%'}
             </span>
           </div>
         </div>
 
-        {/* Capabilities & Official API Details */}
+        {/* Official API Capabilities */}
         {isOfficialPlatform && acc.capabilities && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', fontSize: '0.75rem' }}>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-              {acc.capabilities.supports_text_only && (
-                <span className="badge badge-neutral" style={{ fontSize: '0.67rem' }}>Text</span>
-              )}
-              {(acc.capabilities.supported_media || []).map(media => (
-                <span key={media} className="badge badge-neutral" style={{ fontSize: '0.67rem', textTransform: 'capitalize' }}>
+              {acc.capabilities.supports_text_only && <span className="badge badge-neutral">Text</span>}
+              {(acc.capabilities.supported_media || []).map((media) => (
+                <span key={media} className="badge badge-neutral" style={{ textTransform: 'capitalize' }}>
                   {media}
                 </span>
               ))}
-              {acc.capabilities.requires_public_media_url && (
-                <span className="badge badge-warning" style={{ fontSize: '0.67rem' }}>Requires HTTPS URL</span>
+              {!isDemoMode && acc.capabilities.requires_public_media_url && (
+                <span className="badge badge-warning">Requires HTTPS URL</span>
               )}
             </div>
-            <span style={{ color: 'var(--text-muted)', lineHeight: 1.4 }}>
-              {acc.capabilities.official_api}: {acc.capabilities.notes}
+            <span style={{ color: 'var(--text-muted)', lineHeight: 1.45 }}>
+              {isDemoMode
+                ? `Demo channel ready for simulated posting & analytics.`
+                : `${acc.capabilities.official_api}: ${acc.capabilities.notes}`}
             </span>
           </div>
         )}
 
-        {/* Meta Page Switcher when multiple pages available */}
+        {/* Meta Page Selector (Live OAuth only) */}
         {isLiveOAuth && (acc.platform === 'Facebook' || acc.platform === 'Instagram') && metaPages.length > 0 && (
-          <div style={{
-            padding: '0.6rem 0.75rem',
-            borderRadius: 'var(--radius-sm)',
-            backgroundColor: 'var(--bg-muted)',
-            border: '1px solid var(--border-light)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '0.35rem'
-          }}>
-            <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
+          <div
+            style={{
+              padding: '0.68rem 0.8rem',
+              borderRadius: '10px',
+              backgroundColor: 'var(--bg-muted)',
+              border: '1px solid var(--border-color)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.35rem'
+            }}
+          >
+            <label className="form-label" style={{ fontSize: '0.74rem' }}>
               Active Facebook Page ({metaPages.length} available)
             </label>
             <select
-              className="input-field"
+              className="form-input"
               value={activeMetaPage?.page_id || metaPages[0]?.page_id || ''}
               disabled={switchingPage}
               onChange={(e) => handleSelectMetaPage(e.target.value)}
-              style={{ fontSize: '0.78rem', padding: '0.35rem 0.5rem' }}
+              style={{ fontSize: '0.78rem', padding: '0.38rem 0.55rem' }}
             >
-              {metaPages.map(page => (
+              {metaPages.map((page) => (
                 <option key={page.page_id} value={page.page_id}>
                   {page.name} {page.has_instagram ? `(IG: @${page.instagram_username || 'linked'})` : '(No IG linked)'}
                 </option>
@@ -407,153 +378,103 @@ export default function Accounts({
           </div>
         )}
 
-        {/* Last API Error if any */}
-        {acc.last_error && (
-          <div style={{
-            fontSize: '0.74rem',
-            color: 'var(--danger)',
-            backgroundColor: 'var(--danger-bg)',
-            padding: '0.5rem 0.7rem',
-            borderRadius: 'var(--radius-sm)',
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '0.4rem',
-            lineHeight: 1.35
-          }}>
+        {/* API Error (Live Mode) */}
+        {!isDemoMode && acc.last_error && (
+          <div className="ss-alert ss-alert-danger" style={{ padding: '0.58rem 0.75rem', fontSize: '0.75rem' }}>
             <AlertCircle size={14} style={{ flexShrink: 0, marginTop: '1px' }} />
             <span>{acc.last_error}</span>
           </div>
         )}
 
-        {/* Status Message */}
+        {/* Status Note */}
         {acc.status_message && (
-          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '5px' }}>
             <Activity size={12} style={{ flexShrink: 0 }} />
             <span>{acc.status_message}</span>
           </div>
         )}
 
-        {/* Missing Credentials Notice for Official Platforms */}
-        {isOfficialPlatform && !isLiveOAuth && !oauthReadyOnServer && missingEnv.length > 0 && (
-          <div style={{
-            fontSize: '0.73rem',
-            color: 'var(--text-secondary)',
-            backgroundColor: 'var(--bg-muted)',
-            padding: '0.5rem 0.65rem',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px dashed var(--border-color)'
-          }}>
-            <strong>Missing Backend Env:</strong> <code>{missingEnv.join(', ')}</code>
-          </div>
-        )}
-
         {/* Bottom Actions */}
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '0.6rem',
-          paddingTop: '0.75rem',
-          borderTop: '1px solid var(--border-light)'
-        }}>
-          {isOfficialPlatform && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', justifyContent: 'space-between' }}>
-              {!isLiveOAuth ? (
-                <>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.6rem',
+            paddingTop: '0.75rem',
+            borderTop: '1px solid var(--border-light)'
+          }}
+        >
+          {isDemoMode ? (
+            <button
+              type="button"
+              disabled={isSyncing}
+              onClick={() => handleSyncSingle(acc)}
+              className="btn-secondary btn-sm"
+            >
+              <RefreshCw size={13} />
+              <span>{isSyncing ? 'Syncing Demo...' : 'Sync Demo Metrics'}</span>
+            </button>
+          ) : (
+            isOfficialPlatform && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+                {!isLiveOAuth ? (
                   <button
                     type="button"
-                    disabled={isOAuthBusy}
-                    onClick={() => handleOAuthConnect(acc.platform)}
-                    className="btn-primary"
-                    style={{
-                      padding: '0.45rem 0.9rem',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                      flex: 1,
-                      justifyContent: 'center'
-                    }}
+                    onClick={() => handleOAuthNotConfigured(acc.platform)}
+                    className="btn-secondary btn-sm"
+                    style={{ flex: 1, borderColor: 'var(--warning-border)', color: 'var(--warning)' }}
                   >
-                    {isOAuthBusy ? <RefreshCw size={13} className="animate-spin" /> : <Link2 size={14} />}
-                    <span>Connect {acc.platform} via OAuth</span>
+                    <KeyRound size={13} />
+                    <span>OAuth Setup Required</span>
                   </button>
-                  {acc.platform === 'Instagram' && oauthConfig?.providers?.Instagram?.instagram_login_configured && (
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isSyncing}
+                      onClick={() => handleSyncSingle(acc)}
+                      className="btn-secondary btn-sm"
+                      style={{ flex: 1 }}
+                    >
+                      <RefreshCw size={13} />
+                      <span>{isSyncing ? 'Syncing...' : 'Sync Live'}</span>
+                    </button>
                     <button
                       type="button"
                       disabled={isOAuthBusy}
-                      onClick={() => handleOAuthConnect('Instagram', 'instagram_login')}
-                      className="btn-secondary"
-                      style={{ padding: '0.45rem 0.75rem', fontSize: '0.76rem' }}
-                      title="Use Instagram Login for Business instead of Facebook Login"
+                      onClick={() => handleDisconnectOAuth(acc.platform)}
+                      className="btn-secondary btn-sm"
+                      style={{ color: 'var(--danger)', borderColor: 'var(--danger-border)' }}
                     >
-                      IG Login
+                      <Unlink size={13} />
+                      <span>Disconnect</span>
                     </button>
-                  )}
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    disabled={isSyncing}
-                    onClick={() => handleSyncSingle(acc)}
-                    className="btn-secondary"
-                    style={{
-                      padding: '0.42rem 0.8rem',
-                      fontSize: '0.78rem',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.35rem'
-                    }}
-                  >
-                    <RefreshCw size={13} className={isSyncing ? 'animate-spin' : ''} />
-                    <span>Sync Live</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isOAuthBusy}
-                    onClick={() => handleDisconnectOAuth(acc.platform)}
-                    className="btn-secondary"
-                    style={{
-                      padding: '0.42rem 0.8rem',
-                      fontSize: '0.78rem',
-                      color: 'var(--danger)',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.35rem'
-                    }}
-                  >
-                    <Unlink size={13} />
-                    <span>Disconnect OAuth</span>
-                  </button>
-                </>
-              )}
-            </div>
+                  </>
+                )}
+              </div>
+            )
           )}
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
-            <span style={{ fontSize: '0.77rem', color: 'var(--text-muted)' }}>
-              {isOfficialPlatform
-                ? (isLiveOAuth ? 'Live + Sandbox allowed' : 'Sandbox simulation enabled')
-                : (acc.connected ? 'Sandbox simulation active' : 'Sandbox paused')}
+            <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+              {isDemoMode
+                ? acc.connected
+                  ? 'Demo channel active'
+                  : 'Demo channel paused'
+                : isOfficialPlatform
+                  ? isLiveOAuth
+                    ? 'Live OAuth active'
+                    : 'Local SQLite record only'
+                  : 'No official OAuth integration'}
             </span>
 
             <button
               type="button"
               disabled={isToggling}
               onClick={() => handleToggle(acc.id)}
-              className="btn-secondary"
-              style={{
-                padding: '0.38rem 0.85rem',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.35rem'
-              }}
+              className="btn-outline btn-sm"
             >
-              {isToggling && <RefreshCw size={12} className="animate-spin" />}
-              <span>{acc.connected ? 'Pause Channel' : 'Enable Channel'}</span>
+              {isToggling ? 'Updating...' : acc.connected ? 'Pause Channel' : 'Enable Channel'}
             </button>
           </div>
         </div>
@@ -562,62 +483,50 @@ export default function Accounts({
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem', width: '100%' }} className="animate-fade-in">
-      {/* Header and Sync All Action */}
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: '1rem'
-      }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.6rem' }} className="animate-fade-in">
+      {/* Page Header */}
+      <div className="ss-page-header">
         <div>
-          <h2 style={{ fontSize: '1.4rem', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>Connected Social Accounts</h2>
-          <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', margin: '0.25rem 0 0 0' }}>
-            Connect official OAuth 2.0 accounts for real publishing (Instagram, Facebook Pages, YouTube) or keep Sandbox Mode channels separate.
+          <h2 className="ss-page-title">Connected Social Accounts</h2>
+          <p className="ss-page-subtitle">
+            {isDemoMode
+              ? 'Demo workspace accounts (Instagram, Facebook Pages, YouTube, X, LinkedIn, TikTok) with simulated followers & status toggles.'
+              : 'Live Flask & SQLite channel status. Real external publishing and sync for Instagram, Facebook Pages, and YouTube require OAuth configuration.'}
           </p>
         </div>
 
-        <button
-          onClick={handleSyncAll}
-          disabled={globalSyncing}
-          className="btn-primary"
-          style={{ padding: '0.65rem 1.4rem', fontSize: '0.88rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
-        >
-          <RefreshCw size={16} className={globalSyncing ? 'animate-spin' : ''} />
-          <span>{globalSyncing ? 'Syncing Channels...' : 'Sync All Accounts'}</span>
+        <button onClick={handleSyncAll} disabled={globalSyncing} className="btn-primary">
+          <RefreshCw size={15} />
+          <span>
+            {globalSyncing
+              ? 'Syncing Channels...'
+              : isDemoMode
+              ? 'Sync Demo Accounts'
+              : 'Check Live Sync'}
+          </span>
         </button>
       </div>
 
-      {/* Mode Separation Help Banner */}
-      <div className="help-box" style={{ borderLeft: '4px solid var(--primary)' }}>
-        <Info size={20} color="var(--primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
+      {/* Mode Separation Callout */}
+      <div className="help-box">
+        <Info size={18} color="var(--primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
         <div>
-          <strong style={{ display: 'block', marginBottom: '2px', color: 'var(--text-primary)' }}>
-            Live API Mode vs Sandbox Simulation Mode
-          </strong>
-          <span>
-            Official OAuth integrations (Instagram Graph API, Facebook Pages Graph API, YouTube Data API v3) store encrypted tokens on the Flask backend only. Unconnected platforms remain in <strong>Sandbox Mode</strong> and are never reported as real social publishes.
-          </span>
+          {isDemoMode ? (
+            <>
+              <strong style={{ color: 'var(--text-primary)' }}>Dummy Demo Mode Active:</strong> These accounts use realistic SQLite demo metrics so you can test toggling, syncing, composing, and scheduling without OAuth keys. Simulated posts never leave the app.
+            </>
+          ) : (
+            <>
+              <strong style={{ color: 'var(--text-primary)' }}>Live Server Mode Active:</strong> Connected directly to Flask &amp; SQLite (<code>{backendStatus}</code>). Unconfigured social networks clearly indicate <strong>OAuth Setup Required</strong> instead of simulating fake live connections.
+            </>
+          )}
         </div>
       </div>
 
-      {/* OAuth Callback Result Banner */}
-      {oauthNotice && (
-        <div style={{
-          backgroundColor: oauthNotice.type === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)',
-          color: oauthNotice.type === 'error' ? 'var(--danger)' : 'var(--success)',
-          padding: '0.85rem 1.15rem',
-          borderRadius: 'var(--radius-md)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '0.65rem',
-          fontSize: '0.88rem',
-          fontWeight: 600,
-          border: `1px solid ${oauthNotice.type === 'error' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.25)'}`
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+      {/* OAuth Notice Banner */}
+      {!isDemoMode && oauthNotice && (
+        <div className={`ss-alert ${oauthNotice.type === 'error' ? 'ss-alert-danger' : 'ss-alert-success'}`} style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontWeight: 600 }}>
             {oauthNotice.type === 'error' ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
             <span>{oauthNotice.text}</span>
           </div>
@@ -625,8 +534,8 @@ export default function Accounts({
             <button
               type="button"
               onClick={onClearOAuthNotice}
-              style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: '2px' }}
               aria-label="Dismiss notification"
+              style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: '2px' }}
             >
               <CloseIcon size={16} />
             </button>
@@ -634,94 +543,44 @@ export default function Accounts({
         </div>
       )}
 
-      {/* Action Feedback Alert */}
+      {/* Feedback Banner */}
       {feedback && (
-        <div style={{
-          backgroundColor: feedback.type === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)',
-          color: feedback.type === 'error' ? 'var(--danger)' : 'var(--success)',
-          padding: '0.85rem 1.15rem',
-          borderRadius: 'var(--radius-md)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.65rem',
-          fontSize: '0.88rem',
-          fontWeight: 600,
-          border: `1px solid ${feedback.type === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(16, 185, 129, 0.2)'}`
-        }}>
+        <div className={`ss-alert ${feedback.type === 'error' ? 'ss-alert-danger' : 'ss-alert-success'}`} style={{ fontWeight: 600 }}>
           {feedback.type === 'error' ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
           <span>{feedback.text}</span>
         </div>
       )}
 
-      {/* Backend OAuth Configuration Helper Box (shown when user clicks Connect without env configured) */}
-      {setupGuidePlatform && (
-        <div className="clean-card" style={{ padding: '1.25rem', borderLeft: '4px solid var(--warning)', backgroundColor: 'var(--bg-muted)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-            <div>
-              <h4 style={{ margin: '0 0 0.4rem 0', fontSize: '0.96rem', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-                <ExternalLink size={16} color="var(--warning)" />
-                <span>{setupGuidePlatform.platform} OAuth Credentials Required in Backend</span>
-              </h4>
-              <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                {setupGuidePlatform.error}
-              </p>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                <div><strong>1.</strong> Copy <code>backend/.env.example</code> to <code>backend/.env</code> and set: <code>{setupGuidePlatform.missingEnv.join(', ')}</code></div>
-                {setupGuidePlatform.providerConfig?.redirect_uri && (
-                  <div><strong>2.</strong> Register Redirect URI in developer console: <code>{setupGuidePlatform.providerConfig.redirect_uri}</code></div>
-                )}
-                {setupGuidePlatform.providerConfig?.required_scopes && (
-                  <div><strong>3.</strong> Enable Scopes: <code>{setupGuidePlatform.providerConfig.required_scopes.join(', ')}</code></div>
-                )}
-                <div><strong>4.</strong> Restart Flask backend and click <strong>Connect {setupGuidePlatform.platform} via OAuth</strong> again.</div>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setSetupGuidePlatform(null)}
-              className="btn-secondary"
-              style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Official Live API Platforms */}
+      {/* Core Platforms */}
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.9rem' }}>
-          <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-            Official Live Integrations (Instagram, Facebook Pages, YouTube)
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '1.08rem', fontWeight: 700 }}>
+            {isDemoMode
+              ? 'Primary Demo Channels (Instagram, Facebook Pages, YouTube)'
+              : 'Official Live Integrations (Instagram, Facebook Pages, YouTube)'}
           </h3>
-          <span className="badge badge-primary" style={{ fontSize: '0.72rem' }}>OAuth 2.0 Ready</span>
+          <span className={`badge ${isDemoMode ? 'badge-primary' : 'badge-warning'}`}>
+            {isDemoMode ? 'Demo Connected' : 'OAuth Setup Required'}
+          </span>
         </div>
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))',
-          gap: '1.5rem',
-          width: '100%'
-        }}>
-          {officialAccounts.map(acc => renderAccountCard(acc, true))}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))', gap: '1.35rem' }}>
+          {officialAccounts.map((acc) => renderAccountCard(acc, true))}
         </div>
       </div>
 
-      {/* Legacy Sandbox-Only Platforms */}
+      {/* Additional Channels */}
       {sandboxOnlyAccounts.length > 0 && (
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.9rem' }}>
-            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-              Sandbox-Only Channels (Demo Simulation)
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <h3 style={{ margin: 0, fontSize: '1.08rem', fontWeight: 700 }}>
+              {isDemoMode ? 'Extended Demo Channels (Simulated)' : 'Additional Channels (OAuth Not Implemented)'}
             </h3>
-            <span className="badge badge-neutral" style={{ fontSize: '0.72rem' }}>Sandbox Mode Only</span>
+            <span className="badge badge-neutral">
+              {isDemoMode ? 'Demo Workspace' : 'Local Profile Only'}
+            </span>
           </div>
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))',
-            gap: '1.5rem',
-            width: '100%'
-          }}>
-            {sandboxOnlyAccounts.map(acc => renderAccountCard(acc, false))}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))', gap: '1.35rem' }}>
+            {sandboxOnlyAccounts.map((acc) => renderAccountCard(acc, false))}
           </div>
         </div>
       )}

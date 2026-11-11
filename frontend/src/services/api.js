@@ -38,6 +38,46 @@ export function isTrustedOAuthUrl(value) {
   }
 }
 
+export const APP_MODE_KEY = 'socialsync_app_mode';
+
+export function getAppMode() {
+  if (typeof window === 'undefined') return 'demo';
+  const saved = localStorage.getItem(APP_MODE_KEY);
+  return saved === 'live' ? 'live' : 'demo';
+}
+
+export function setAppMode(mode) {
+  const normalized = mode === 'live' ? 'live' : 'demo';
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(APP_MODE_KEY, normalized);
+  }
+  return normalized;
+}
+
+function cacheKey(resource, mode = getAppMode()) {
+  const normalized = mode === 'live' ? 'live' : 'demo';
+  return `socialsync_${normalized}_${resource}`;
+}
+
+function readCache(resource, mode = getAppMode(), fallback = []) {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = localStorage.getItem(cacheKey(resource, mode));
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeCache(resource, value, mode = getAppMode()) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(cacheKey(resource, mode), JSON.stringify(value));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export function clearSessionStorageCaches() {
   if (typeof window === 'undefined') return;
   [
@@ -48,6 +88,14 @@ export function clearSessionStorageCaches() {
     'socialsync_campaigns',
     'socialsync_activity',
     'socialsync_initialized',
+    'socialsync_demo_accounts',
+    'socialsync_demo_posts',
+    'socialsync_demo_campaigns',
+    'socialsync_demo_activity',
+    'socialsync_live_accounts',
+    'socialsync_live_posts',
+    'socialsync_live_campaigns',
+    'socialsync_live_activity',
   ].forEach((key) => localStorage.removeItem(key));
 }
 
@@ -131,6 +179,7 @@ export const api = {
       if (data && data.success && data.token) {
         localStorage.setItem('socialsync_token', data.token);
         localStorage.setItem('socialsync_user', JSON.stringify(data.user));
+        setAppMode(data.user?.app_mode || 'demo');
         return data;
       }
       return { success: false, message: data?.message || 'Authentication failed.' };
@@ -151,6 +200,7 @@ export const api = {
       if (data && data.success && data.token) {
         localStorage.setItem('socialsync_token', data.token);
         localStorage.setItem('socialsync_user', JSON.stringify(data.user));
+        setAppMode(data.user?.app_mode || 'demo');
         return data;
       }
       return { success: false, message: data?.message || 'Registration failed.' };
@@ -208,6 +258,18 @@ export const api = {
     return await res.json();
   },
 
+  // --- OPERATING MODE SETTINGS ---
+  async getAppModeSetting() {
+    return await request('/settings/mode', {}, false);
+  },
+
+  async updateAppModeSetting(appMode) {
+    return await request('/settings/mode', {
+      method: 'PUT',
+      body: JSON.stringify({ app_mode: appMode === 'live' ? 'live' : 'demo' })
+    }, false);
+  },
+
   // --- NOTIFICATION SETTINGS ---
   async getNotificationSettings() {
     return await request('/settings/notifications', {}, false);
@@ -254,38 +316,67 @@ export const api = {
   },
 
   // --- ACCOUNTS ---
-  async getAccounts() {
-    const data = await request('/accounts');
+  async getAccounts(mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/accounts?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {},
+      activeMode === 'demo'
+    );
     if (data && Array.isArray(data)) {
-      localStorage.setItem('socialsync_accounts', JSON.stringify(data));
+      writeCache('accounts', data, activeMode);
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
+    return readCache('accounts', activeMode, []);
   },
 
-  async toggleAccount(id) {
-    const data = await request(`/accounts/${id}/toggle`, { method: 'POST' });
+  async toggleAccount(id, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/accounts/${id}/toggle?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ workspace_mode: activeMode })
+      },
+      activeMode === 'demo'
+    );
     if (data && data.id) {
-      const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
+      const accounts = readCache('accounts', activeMode, []);
       const updated = accounts.map(a => a.id === id ? data : a);
-      localStorage.setItem('socialsync_accounts', JSON.stringify(updated));
+      writeCache('accounts', updated, activeMode);
       return data;
     }
-    // Fallback
-    const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
+    // Offline fallback ONLY in demo mode
+    const accounts = readCache('accounts', activeMode, []);
     const updated = accounts.map(a => a.id === id ? { ...a, connected: a.connected ? 0 : 1 } : a);
-    localStorage.setItem('socialsync_accounts', JSON.stringify(updated));
+    writeCache('accounts', updated, activeMode);
     return updated.find(a => a.id === id);
   },
 
-  async syncAccount(id) {
-    return await request(`/accounts/${id}/sync`, { method: 'POST' }, false);
+  async syncAccount(id, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    return await request(
+      `/accounts/${id}/sync?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ workspace_mode: activeMode })
+      },
+      false
+    );
   },
 
-  async syncAllAccounts() {
-    const data = await request('/accounts/sync-all', { method: 'POST' }, false);
+  async syncAllAccounts(mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/accounts/sync-all?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ workspace_mode: activeMode })
+      },
+      false
+    );
     if (data && data.accounts) {
-      localStorage.setItem('socialsync_accounts', JSON.stringify(data.accounts));
+      writeCache('accounts', data.accounts, activeMode);
       return data;
     }
     throw new ApiError('Sync failed: unexpected response from backend.', 500, data);
@@ -303,19 +394,22 @@ export const api = {
   },
 
   // --- POSTS ---
-  async getPosts(status = 'all', search = '', campaignId = '') {
-    let query = '?';
-    if (status && status !== 'all') query += `status=${status}&`;
-    if (search) query += `search=${encodeURIComponent(search)}&`;
-    if (campaignId) query += `campaign_id=${campaignId}&`;
-    query = query.replace(/[?&]$/, '');
+  async getPosts(status = 'all', search = '', campaignId = '', mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const params = new URLSearchParams();
+    params.set('workspace_mode', activeMode);
+    if (status && status !== 'all') params.set('status', status);
+    if (search) params.set('search', search);
+    if (campaignId) params.set('campaign_id', campaignId);
 
-    const data = await request(`/posts${query}`);
+    const data = await request(`/posts?${params.toString()}`, {}, activeMode === 'demo');
     if (data && Array.isArray(data)) {
-      localStorage.setItem('socialsync_posts', JSON.stringify(data));
+      if (status === 'all' && !search && !campaignId) {
+        writeCache('posts', data, activeMode);
+      }
       return data;
     }
-    let posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
+    let posts = readCache('posts', activeMode, []);
     if (status && status !== 'all') {
       posts = posts.filter(p => p.status === status);
     }
@@ -324,90 +418,125 @@ export const api = {
     }
     if (search) {
       const s = search.toLowerCase();
-      posts = posts.filter(p => p.content.toLowerCase().includes(s));
+      posts = posts.filter(p => (p.content || '').toLowerCase().includes(s));
     }
     return posts;
   },
 
-  async createPost(postData) {
-    const isLive = postData?.publish_mode === 'live';
+  async createPost(postData, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const allowFallback = activeMode === 'demo' && postData?.publish_mode !== 'live';
+    const payload = {
+      ...postData,
+      workspace_mode: activeMode,
+      publish_mode: activeMode === 'demo' ? 'demo' : (postData?.publish_mode || 'sandbox')
+    };
     const data = await request('/posts', {
       method: 'POST',
-      body: JSON.stringify(postData)
-    }, !isLive);
+      body: JSON.stringify(payload)
+    }, allowFallback);
     if (data && data.id) {
-      const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-      localStorage.setItem('socialsync_posts', JSON.stringify([data, ...posts]));
+      const posts = readCache('posts', activeMode, []);
+      writeCache('posts', [data, ...posts], activeMode);
       return data;
     }
-    // Offline fallback ONLY for non-live (Sandbox/Draft) mode when backend is unreachable
+    // Offline fallback ONLY for Demo Mode when backend is temporarily unreachable
+    const nowStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const platformsList = postData.platforms || ['Instagram'];
+    const isPublished = postData.status === 'published';
     const newPost = {
       id: Date.now(),
       campaign_id: postData.campaign_id || null,
       content: postData.content,
-      platforms: postData.platforms || ['Instagram'],
+      platforms: platformsList,
       media_url: postData.media_url || null,
       media_type: postData.media_type || (postData.media_url ? 'image' : 'text'),
-      publish_mode: 'sandbox',
+      workspace_mode: 'demo',
+      publish_mode: 'demo',
       status: postData.status || 'draft',
       scheduled_for: postData.scheduled_for || null,
-      created_at: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      likes: postData.status === 'published' ? Math.floor(Math.random() * 120 + 20) : 0,
-      comments: postData.status === 'published' ? Math.floor(Math.random() * 25 + 5) : 0,
-      shares: postData.status === 'published' ? Math.floor(Math.random() * 15 + 2) : 0,
-      reach: postData.status === 'published' ? Math.floor(Math.random() * 2400 + 800) : 0
+      created_at: nowStr,
+      published_at: isPublished ? nowStr : null,
+      publish_results: isPublished
+        ? platformsList.map(pl => ({ platform: pl, success: true, simulated: true, mode: 'demo', label: 'Demo Published' }))
+        : [],
+      likes: isPublished ? Math.floor(Math.random() * 120 + 20) : 0,
+      comments: isPublished ? Math.floor(Math.random() * 25 + 5) : 0,
+      shares: isPublished ? Math.floor(Math.random() * 15 + 2) : 0,
+      reach: isPublished ? Math.floor(Math.random() * 2400 + 800) : 0
     };
-    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-    const updated = [newPost, ...posts];
-    localStorage.setItem('socialsync_posts', JSON.stringify(updated));
+    const posts = readCache('posts', activeMode, []);
+    writeCache('posts', [newPost, ...posts], activeMode);
     return newPost;
   },
 
-  async updatePost(id, postData) {
-    const isLive = postData?.publish_mode === 'live';
-    const data = await request(`/posts/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(postData)
-    }, !isLive);
+  async updatePost(id, postData, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const allowFallback = activeMode === 'demo' && postData?.publish_mode !== 'live';
+    const payload = {
+      ...postData,
+      workspace_mode: activeMode,
+      ...(activeMode === 'demo' ? { publish_mode: 'demo' } : {})
+    };
+    const data = await request(
+      `/posts/${id}?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      },
+      allowFallback
+    );
     if (data && data.id) {
-      const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-      const updated = posts.map(p => p.id === id ? data : p);
-      localStorage.setItem('socialsync_posts', JSON.stringify(updated));
+      const posts = readCache('posts', activeMode, []);
+      writeCache('posts', posts.map(p => p.id === id ? data : p), activeMode);
       return data;
     }
-    // Offline fallback only when backend is unreachable in non-live mode
-    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-    const updated = posts.map(p => p.id === id ? { ...p, ...postData } : p);
-    localStorage.setItem('socialsync_posts', JSON.stringify(updated));
+    const posts = readCache('posts', activeMode, []);
+    const updated = posts.map(p => p.id === id ? { ...p, ...payload } : p);
+    writeCache('posts', updated, activeMode);
     return updated.find(p => p.id === id);
   },
 
-  async deletePost(id) {
-    const data = await request(`/posts/${id}`, { method: 'DELETE' });
-    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-    const updated = posts.filter(p => p.id !== id);
-    localStorage.setItem('socialsync_posts', JSON.stringify(updated));
+  async deletePost(id, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/posts/${id}?workspace_mode=${encodeURIComponent(activeMode)}`,
+      { method: 'DELETE' },
+      activeMode === 'demo'
+    );
+    const posts = readCache('posts', activeMode, []);
+    writeCache('posts', posts.filter(p => p.id !== id), activeMode);
     return data || { success: true };
   },
 
   // --- CAMPAIGNS ---
-  async getCampaigns() {
-    const data = await request('/campaigns');
+  async getCampaigns(mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/campaigns?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {},
+      activeMode === 'demo'
+    );
     if (data && Array.isArray(data)) {
-      localStorage.setItem('socialsync_campaigns', JSON.stringify(data));
+      writeCache('campaigns', data, activeMode);
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+    return readCache('campaigns', activeMode, []);
   },
 
-  async createCampaign(campData) {
-    const data = await request('/campaigns', {
-      method: 'POST',
-      body: JSON.stringify(campData)
-    });
+  async createCampaign(campData, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      '/campaigns',
+      {
+        method: 'POST',
+        body: JSON.stringify({ ...campData, workspace_mode: activeMode })
+      },
+      activeMode === 'demo'
+    );
     if (data && data.id) {
-      const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
-      localStorage.setItem('socialsync_campaigns', JSON.stringify([data, ...camps]));
+      const camps = readCache('campaigns', activeMode, []);
+      writeCache('campaigns', [data, ...camps], activeMode);
       return data;
     }
     const newCamp = {
@@ -420,45 +549,59 @@ export const api = {
       current_reach: 0,
       budget: campData.budget || '$1,000',
       start_date: campData.start_date || new Date().toISOString().split('T')[0],
-      end_date: campData.end_date || null
+      end_date: campData.end_date || null,
+      workspace_mode: activeMode
     };
-    const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
-    localStorage.setItem('socialsync_campaigns', JSON.stringify([newCamp, ...camps]));
+    const camps = readCache('campaigns', activeMode, []);
+    writeCache('campaigns', [newCamp, ...camps], activeMode);
     return newCamp;
   },
 
-  async updateCampaign(id, campData) {
-    const data = await request(`/campaigns/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(campData)
-    });
+  async updateCampaign(id, campData, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/campaigns/${id}?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ ...campData, workspace_mode: activeMode })
+      },
+      activeMode === 'demo'
+    );
     if (data && data.id) {
-      const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
-      const updated = camps.map(c => c.id === id ? data : c);
-      localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+      const camps = readCache('campaigns', activeMode, []);
+      writeCache('campaigns', camps.map(c => c.id === id ? data : c), activeMode);
       return data;
     }
-    // Fallback
-    const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+    const camps = readCache('campaigns', activeMode, []);
     const updated = camps.map(c => c.id === id ? { ...c, ...campData } : c);
-    localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+    writeCache('campaigns', updated, activeMode);
     return updated.find(c => c.id === id);
   },
 
-  async deleteCampaign(id) {
-    const data = await request(`/campaigns/${id}`, { method: 'DELETE' });
-    const camps = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
-    const updated = camps.filter(c => c.id !== id);
-    localStorage.setItem('socialsync_campaigns', JSON.stringify(updated));
+  async deleteCampaign(id, mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/campaigns/${id}?workspace_mode=${encodeURIComponent(activeMode)}`,
+      { method: 'DELETE' },
+      activeMode === 'demo'
+    );
+    const camps = readCache('campaigns', activeMode, []);
+    writeCache('campaigns', camps.filter(c => c.id !== id), activeMode);
     return data || { success: true };
   },
 
   // --- ANALYTICS ---
-  async getAnalytics(range = '7d') {
-    const data = await request(`/analytics?range=${range}`);
+  async getAnalytics(range = '7d', mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/analytics?range=${encodeURIComponent(range)}&workspace_mode=${encodeURIComponent(activeMode)}`,
+      {},
+      activeMode === 'demo'
+    );
     if (data && data.summary) return data;
 
     return {
+      workspace_mode: activeMode,
       summary: {
         total_followers: 0,
         total_following: 0,
@@ -471,36 +614,55 @@ export const api = {
         range
       },
       history: [],
-      platforms: []
+      platforms: [],
+      live_analytics: {
+        connected_live_accounts: [],
+        snapshots: [],
+        oauth_required: activeMode === 'live',
+        demo_mode: activeMode === 'demo',
+        live_posts_count: 0,
+        sandbox_posts_count: 0,
+        demo_posts_count: 0,
+        failed_posts_count: 0,
+      }
     };
   },
 
   // --- GLOBAL SEARCH ---
-  async search(query) {
+  async search(query, mode = getAppMode()) {
     if (!query) return { posts: [], accounts: [], campaigns: [] };
-    const data = await request(`/search?q=${encodeURIComponent(query)}`);
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/search?q=${encodeURIComponent(query)}&workspace_mode=${encodeURIComponent(activeMode)}`,
+      {},
+      activeMode === 'demo'
+    );
     if (data && data.posts) return data;
 
-    // Fallback search
     const q = query.toLowerCase();
-    const posts = JSON.parse(localStorage.getItem('socialsync_posts') || '[]');
-    const accounts = JSON.parse(localStorage.getItem('socialsync_accounts') || '[]');
-    const campaigns = JSON.parse(localStorage.getItem('socialsync_campaigns') || '[]');
+    const posts = readCache('posts', activeMode, []);
+    const accounts = readCache('accounts', activeMode, []);
+    const campaigns = readCache('campaigns', activeMode, []);
 
     return {
-      posts: posts.filter(p => p.content.toLowerCase().includes(q)).slice(0, 6),
-      accounts: accounts.filter(a => a.name.toLowerCase().includes(q) || a.handle.toLowerCase().includes(q) || a.platform.toLowerCase().includes(q)).slice(0, 6),
-      campaigns: campaigns.filter(c => c.title.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)).slice(0, 6)
+      posts: posts.filter(p => (p.content || '').toLowerCase().includes(q)).slice(0, 6),
+      accounts: accounts.filter(a => (a.name || '').toLowerCase().includes(q) || (a.handle || '').toLowerCase().includes(q) || (a.platform || '').toLowerCase().includes(q)).slice(0, 6),
+      campaigns: campaigns.filter(c => (c.title || '').toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q)).slice(0, 6)
     };
   },
 
   // --- ACTIVITY ---
-  async getActivity() {
-    const data = await request('/activity');
+  async getActivity(mode = getAppMode()) {
+    const activeMode = mode === 'live' ? 'live' : 'demo';
+    const data = await request(
+      `/activity?workspace_mode=${encodeURIComponent(activeMode)}`,
+      {},
+      activeMode === 'demo'
+    );
     if (data && Array.isArray(data)) {
-      localStorage.setItem('socialsync_activity', JSON.stringify(data));
+      writeCache('activity', data, activeMode);
       return data;
     }
-    return JSON.parse(localStorage.getItem('socialsync_activity') || '[]');
+    return readCache('activity', activeMode, []);
   }
 };
